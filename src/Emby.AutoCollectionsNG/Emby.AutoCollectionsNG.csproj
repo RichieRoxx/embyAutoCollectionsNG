@@ -27,4 +27,14 @@
     </AssemblyAttribute>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Plugin configuration page (issue #9), served via IHasWebPages/PluginPageInfo. The
+         manifest resource name the host must be given in PluginPageInfo.EmbeddedResourcePath is
+         the default .NET convention: RootNamespace + folder path + file name, each separator
+         replaced with '.' -> "Emby.AutoCollectionsNG.Configuration.configPage.html" (verified by
+         ConfigPageEmbeddedResourceTests, which loads the built assembly and asserts the resource
+         is present under that exact name). -->
+    <EmbeddedResource Include="Configuration\configPage.html" />
+  </ItemGroup>
+
 </Project>
