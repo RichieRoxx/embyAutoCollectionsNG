@@ -120,8 +120,13 @@ this as the fallback in #3.
 | `MediaBrowser.Model.Tasks.ITaskManager` | ✅ | `QueueScheduledTask(IScheduledTask task, TaskOptions options)` and a parameterless `QueueScheduledTask<T>()`-style overload set — use this to trigger the task manually (UI button #9, event trigger #8) |
 | `ITaskManager.ScheduledTasks` | ✅ | `IScheduledTaskWorker[]` — enumerate to find our task's worker if `QueueScheduledTask(IScheduledTask, ...)` needs a worker instance instead |
 | `ITaskManager` events | ✅ | `TaskExecuting`, `TaskCompleted` |
+| `MediaBrowser.Model.Tasks.TaskTriggerInfo` | ✅ | class, parameterless ctor; properties: `string Type { get; set; }`, `long? TimeOfDayTicks { get; set; }`, `long? IntervalTicks { get; set; }`, `SystemEvent? SystemEvent { get; set; }`, `DayOfWeek? DayOfWeek { get; set; }`, `long? MaxRuntimeTicks { get; set; }`. Static string constants for `Type`: `TriggerDaily` = `"DailyTrigger"`, `TriggerWeekly` = `"WeeklyTrigger"`, `TriggerInterval` = `"IntervalTrigger"`, `TriggerSystemEvent` = `"SystemEventTrigger"`, `TriggerStartup` = `"StartupTrigger"`. A daily-at-a-specific-time trigger is `new TaskTriggerInfo { Type = TaskTriggerInfo.TriggerDaily, TimeOfDayTicks = TimeSpan.FromHours(4).Ticks }` (ticks since midnight). Used by `AutoCollectionsSyncTask.GetDefaultTriggers()` (#7). |
+| `MediaBrowser.Model.Tasks.TaskOptions` | ✅ | parameterless ctor + `TaskOptions(TaskOptions cloneFrom)`; `long? MaxRuntimeTicks { get; set; }`, `bool HasManualInteraction { get; set; }`, `LogSeverity LogLevel { get; }` (read-only) |
+| `MediaBrowser.Model.Tasks.TaskCompletionStatus` | ✅ | enum: `Completed`, `Failed`, `Cancelled`, `Aborted` |
 
-Source: reflection against `mediabrowser.server.core` 4.9.1.90.
+Source: reflection against `mediabrowser.server.core` 4.9.1.90 (`MediaBrowser.Model.dll`, loaded from
+`~/.nuget/packages/mediabrowser.common/4.9.1.90/lib/netstandard2.0/MediaBrowser.Model.dll` via a
+throwaway reflection probe, this session, for issue #7).
 
 ## Configuration UI
 

@@ -18,4 +18,13 @@
     <PackageReference Include="System.Memory" Version="4.6.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets the test project use the internal test-seam constructor on
+         AutoCollectionsSyncTask (accepts a pre-built CollectionSyncService + fake config
+         provider) without making that constructor part of the plugin's public API surface. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Emby.AutoCollectionsNG.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>
