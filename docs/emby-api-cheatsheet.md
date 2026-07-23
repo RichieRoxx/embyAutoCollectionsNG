@@ -47,6 +47,8 @@ Sources: reflection against `mediabrowser.server.core` 4.9.1.90; dev.emby.media/
 | `InternalItemsQuery.StartIndex` / `Limit` | ✅ | `int?` each — use for chunked/paged queries on large libraries |
 | `InternalItemsQuery.ParentIds` / `TopParentIds` | ✅ | `long[]` — usable for the library filter |
 | `InternalItemsQuery.DtoOptions` | ✅ | `MediaBrowser.Controller.Dto.DtoOptions` — keep minimal for perf |
+| `ILibraryManager.ItemAdded` / `ItemAdding` / `ItemUpdated` / `ItemRemoved` | ✅ | all four events confirmed, `EventHandler<ItemChangeEventArgs>` |
+| `MediaBrowser.Controller.Library.ItemChangeEventArgs` | ✅ | `BaseItem Item`, `BaseItem Parent`, `ItemUpdateType UpdateReason`, `BaseItem[] CollectionFolders` — used by the event trigger (#8) to filter out the plugin's own BoxSet writes (check `Item is BoxSet`) and debounce on real item changes |
 
 ### Item identity — important gotcha
 
