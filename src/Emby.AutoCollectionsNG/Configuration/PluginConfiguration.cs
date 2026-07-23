@@ -24,6 +24,21 @@ namespace Emby.AutoCollectionsNG.Configuration
         /// (e.g. because the matching rule was deleted or no longer matches anything).
         /// </summary>
         public bool DeleteEmptyCollections { get; set; } = false;
+
+        /// <summary>
+        /// When true, <see cref="Emby.AutoCollectionsNG.EntryPoints.LibraryChangeListener"/> reacts to
+        /// library add/update events (debounced) and queues a sync in addition to the scheduled task
+        /// (#7). When false, only the scheduled task (and manual "run now") sync the library.
+        /// </summary>
+        public bool TriggerOnLibraryChanges { get; set; } = true;
+
+        /// <summary>
+        /// How long <see cref="Emby.AutoCollectionsNG.EntryPoints.LibraryChangeListener"/> waits after
+        /// the last qualifying library event before actually queueing a sync, so a burst of events
+        /// (e.g. an initial library scan adding hundreds of recordings) collapses into roughly one
+        /// sync instead of one per item.
+        /// </summary>
+        public int DebounceMinutes { get; set; } = 5;
     }
 
     /// <summary>
