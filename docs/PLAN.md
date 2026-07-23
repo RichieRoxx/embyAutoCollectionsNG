@@ -60,6 +60,21 @@ own: mass events during a library scan, possibly incomplete metadata on
 
 **MVP = issues #2–#7** (rules via config, periodic + manual sync).
 
+## Hardening / robustness verification (issue #10)
+
+Issue #10 is a verification pass over the sync engine (#6) and scheduled task
+(#7), which were already built with idempotency, defensive error handling,
+and safe regex execution as hard requirements from the start (see
+`CLAUDE.md`). #10 added targeted tests proving those guarantees hold
+(invalid-regex isolation regardless of rule order, null-`Path` items with
+`AlsoMatchFileName`, one collection's failure not blocking others in the same
+run, cancellation leaving no partial collection writes) plus a large-in-memory
+(12k item) regression guard against accidental quadratic behavior. It also
+improved a few error messages to include the affected item IDs. See
+[`docs/performance-notes.md`](performance-notes.md) for the honest scope of
+the large-library simulation (what it validates vs. what still needs a live
+server).
+
 ## References
 
 - https://dev.emby.media/doc/plugins/index.html
