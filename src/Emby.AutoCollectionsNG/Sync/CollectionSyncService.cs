@@ -186,6 +186,27 @@ namespace Emby.AutoCollectionsNG.Sync
             return result;
         }
 
+        // Caps how many internal IDs get spelled out in an error message, so a failure on a
+        // collection with thousands of pending adds/removes doesn't produce an unreadable log line -
+        // the count is already logged separately, this just adds "which ones" context for the common
+        // case of a handful of items.
+        private const int MaxIdsInErrorMessage = 20;
+
+        private static string FormatIds(long[] ids)
+        {
+            if (ids == null || ids.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            if (ids.Length <= MaxIdsInErrorMessage)
+            {
+                return string.Join(", ", ids);
+            }
+
+            return string.Join(", ", ids.Take(MaxIdsInErrorMessage)) + $", … (+{ids.Length - MaxIdsInErrorMessage} more)";
+        }
+
         private InternalItemsQuery BuildItemQuery(List<CollectionRule> validRules)
         {
             var query = new InternalItemsQuery
@@ -414,8 +435,8 @@ namespace Emby.AutoCollectionsNG.Sync
 
             if (!(existing is Folder))
             {
-                result.Errors.Add($"Collection '{collectionName}' was found but is not a Folder-derived item; skipping.");
-                _logger.Error("Auto Collections NG: collection '{0}' was found but is not a Folder-derived item; skipping.", collectionName);
+                result.Errors.Add($"Collection '{collectionName}' was found but is not a Folder-derived item (actual type: {existing.GetType().Name}); skipping.");
+                _logger.Error("Auto Collections NG: collection '{0}' was found but is not a Folder-derived item (actual type: {1}); skipping.", collectionName, existing.GetType().Name);
                 return;
             }
 
@@ -449,8 +470,8 @@ namespace Emby.AutoCollectionsNG.Sync
                 }
                 catch (Exception ex)
                 {
-                    result.Errors.Add($"Failed to add {toAdd.Length} item(s) to collection '{collectionName}': {ex.Message}");
-                    _logger.ErrorException("Auto Collections NG: failed to add items to collection '{0}'", ex, collectionName);
+                    result.Errors.Add($"Failed to add {toAdd.Length} item(s) (internal ids: {FormatIds(toAdd)}) to collection '{collectionName}': {ex.Message}");
+                    _logger.ErrorException("Auto Collections NG: failed to add item(s) (internal ids: {0}) to collection '{1}'", ex, FormatIds(toAdd), collectionName);
                 }
             }
 
@@ -465,8 +486,8 @@ namespace Emby.AutoCollectionsNG.Sync
                     }
                     catch (Exception ex)
                     {
-                        result.Errors.Add($"Failed to remove {toRemove.Length} item(s) from collection '{collectionName}': {ex.Message}");
-                        _logger.ErrorException("Auto Collections NG: failed to remove items from collection '{0}'", ex, collectionName);
+                        result.Errors.Add($"Failed to remove {toRemove.Length} item(s) (internal ids: {FormatIds(toRemove)}) from collection '{collectionName}': {ex.Message}");
+                        _logger.ErrorException("Auto Collections NG: failed to remove item(s) (internal ids: {0}) from collection '{1}'", ex, FormatIds(toRemove), collectionName);
                     }
                 }
                 else

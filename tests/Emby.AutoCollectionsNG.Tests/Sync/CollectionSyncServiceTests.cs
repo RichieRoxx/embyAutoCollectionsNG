@@ -423,5 +423,314 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             await Assert.ThrowsAnyAsync<OperationCanceledException>(
                 () => sut.SyncAsync(config, null, cts.Token));
         }
+
+        // --- Issue #10: hardening/verification gap-fill tests below ---
+
+        [Fact]
+        public async Task ItemWithNullPath_AndAlsoMatchFileNameTrue_DoesNotThrow_AndSimplyDoesNotMatchViaFileName()
+        {
+            // Name is present (so the item isn't skipped as "no title"), Path is null (common for
+            // items without a resolvable file path), and the rule falls back to filename matching.
+            // Must not throw - a null fallback field is just "doesn't match", per RuleMatcher's
+            // null/empty-safe contract (see RuleMatcherTests), exercised here through the full
+            // CollectionSyncService pipeline with a real BaseItem instance.
+            var items = new BaseItem[] { MakeItem(1, "Some unrelated title", path: null) };
+            var (library, collectionManager, logger) = MakeMocks(items);
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[]
+                {
+                    Rule("Formel 1", RuleMatchType.Contains, "Formel", alsoMatchFileName: true)
+                }
+            };
+
+            var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+
+            Assert.Equal(0, result.RuleHitCounts["Formel 1"]);
+            Assert.Empty(result.Errors);
+            Assert.Empty(result.Collections);
+            collectionManager.Verify(m => m.CreateCollection(It.IsAny<CollectionCreationOptions>()), Times.Never);
+        }
+
+        [Fact]
+        public async Task ItemWithNullPath_AndAlsoMatchFileNameTrue_StillMatchesViaPrimaryField()
+        {
+            // Same null-Path setup, but this time the primary field does match, so the filename
+            // fallback (null) is never even consulted - included as a companion to the case above to
+            // show both branches of the null-Path/AlsoMatchFileName combination are safe.
+            var items = new BaseItem[] { MakeItem(1, "Formel 1 Rennen", path: null) };
+            var (library, collectionManager, logger) = MakeMocks(items);
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[]
+                {
+                    Rule("Formel 1", RuleMatchType.Contains, "Formel", alsoMatchFileName: true)
+                }
+            };
+
+            var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+
+            Assert.Equal(1, result.RuleHitCounts["Formel 1"]);
+            Assert.Empty(result.Errors);
+        }
+
+        [Fact]
+        public async Task InvalidRegexRule_DefinedBeforeAValidRule_StillLetsTheValidRuleRun_RegardlessOfArrayOrder()
+        {
+            // Same intent as InvalidRegexRule_IsSkippedAndRecordedAsError_WithoutBlockingOtherRules,
+            // but with a *third*, later-still valid rule added after the broken one, and the broken
+            // rule placed first specifically to guard against any hidden ordering dependency (e.g.
+            // an early-exit on first error) creeping in over time.
+            var items = new BaseItem[]
+            {
+                MakeItem(1, "Formel 1 Rennen"),
+                MakeItem(2, "ZDF Magazin Royale")
+            };
+            var (library, collectionManager, logger) = MakeMocks(items);
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[]
+                {
+                    Rule("Broken Rule", RuleMatchType.Regex, "(["),
+                    Rule("Formel 1", RuleMatchType.Regex, @"(?i)\bformel\s*1\b"),
+                    Rule("ZDF Magazin Royale", RuleMatchType.Contains, "ZDF Magazin Royale")
+                }
+            };
+
+            var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+
+            Assert.True(result.RuleErrors.ContainsKey("Broken Rule"));
+            Assert.False(string.IsNullOrEmpty(result.RuleErrors["Broken Rule"]));
+            Assert.Equal(1, result.RuleHitCounts["Formel 1"]);
+            Assert.Equal(1, result.RuleHitCounts["ZDF Magazin Royale"]);
+            collectionManager.Verify(
+                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o => o.Name == "Formel 1")),
+                Times.Once);
+            collectionManager.Verify(
+                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o => o.Name == "ZDF Magazin Royale")),
+                Times.Once);
+        }
+
+        [Fact]
+        public async Task OneCollectionFailure_DoesNotPreventOtherCollectionsInTheSameRunFromSucceeding()
+        {
+            // Two independent rules targeting two existing collections. AddToCollection throws for
+            // collection "A" only; collection "B" must still be reconciled successfully in the same
+            // SyncAsync call, and the failure on "A" must be recorded, not thrown up to the caller.
+            var items = new BaseItem[]
+            {
+                MakeItem(1, "Collection A item"),
+                MakeItem(2, "Collection B item")
+            };
+            var existingA = MakeExistingCollection(100, "Collection A");
+            var existingB = MakeExistingCollection(200, "Collection B");
+            var (library, collectionManager, logger) = MakeMocks(items, new BaseItem[] { existingA, existingB });
+
+            collectionManager
+                .Setup(m => m.AddToCollection(100, It.IsAny<long[]>()))
+                .ThrowsAsync(new InvalidOperationException("simulated failure for collection A"));
+            collectionManager
+                .Setup(m => m.AddToCollection(200, It.IsAny<long[]>()))
+                .Returns(Task.CompletedTask);
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[]
+                {
+                    Rule("Collection A", RuleMatchType.Contains, "Collection A"),
+                    Rule("Collection B", RuleMatchType.Contains, "Collection B")
+                }
+            };
+
+            var sut = new CollectionSyncService(
+                library.Object,
+                collectionManager.Object,
+                logger.Object,
+                collectionMemberIdsProvider: _ => Array.Empty<long>());
+
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+
+            // "A" failed and is recorded as an error with enough context to act on (collection name,
+            // item ids, and the underlying exception message).
+            Assert.Contains(result.Errors, e =>
+                e.Contains("Collection A", StringComparison.Ordinal) &&
+                e.Contains("simulated failure for collection A", StringComparison.Ordinal));
+            Assert.DoesNotContain(result.Collections, c => c.CollectionName == "Collection A");
+
+            // "B" was still fully processed in the same run.
+            Assert.Contains(result.Collections, c => c.CollectionName == "Collection B" && c.ItemsAdded == 1);
+            collectionManager.Verify(m => m.AddToCollection(200, It.IsAny<long[]>()), Times.Once);
+        }
+
+        [Fact]
+        public async Task Cancellation_MidRun_DoesNotApplyAnyPartialCollectionChanges_AndASubsequentFullRunHeals()
+        {
+            // Simulate cancellation being requested while the item scan is still in progress (e.g. an
+            // external shutdown signal). Since collection reconciliation only happens after the full
+            // item scan completes, and the reconciliation loop itself re-checks the token before each
+            // collection, a cancellation raised during scanning must result in zero collection writes -
+            // there is no partial/half-applied collection state to clean up. A second, uncancelled run
+            // against the same (now-external) state must then reach the correct end state on its own.
+            var items = new BaseItem[] { MakeItem(1, "Formel 1 Rennen") };
+
+            var library = new Mock<ILibraryManager>();
+            var collectionManager = new Mock<ICollectionManager>();
+            var logger = new Mock<ILogger>();
+
+            using var cts = new CancellationTokenSource();
+
+            library
+                .Setup(m => m.GetItemList(It.IsAny<InternalItemsQuery>()))
+                .Returns((InternalItemsQuery q) =>
+                {
+                    if (q.IncludeItemTypes != null && q.IncludeItemTypes.Contains("BoxSet"))
+                    {
+                        return Array.Empty<BaseItem>();
+                    }
+
+                    // Simulate an external cancellation request arriving while this page is being
+                    // fetched. The loop's next iteration (or the reconciliation loop right after)
+                    // will observe it via ThrowIfCancellationRequested().
+                    cts.Cancel();
+                    return items;
+                });
+
+            collectionManager
+                .Setup(m => m.CreateCollection(It.IsAny<CollectionCreationOptions>()))
+                .ReturnsAsync((CollectionCreationOptions o) => new BoxSet { Name = o.Name, InternalId = 9999 });
+            collectionManager
+                .Setup(m => m.AddToCollection(It.IsAny<long>(), It.IsAny<long[]>()))
+                .Returns(Task.CompletedTask);
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[] { Rule("Formel 1", RuleMatchType.Regex, @"(?i)\bformel\s*1\b") }
+            };
+
+            var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => sut.SyncAsync(config, null, cts.Token));
+
+            // No partial write happened: the cancelled run never reached collection reconciliation.
+            collectionManager.Verify(m => m.CreateCollection(It.IsAny<CollectionCreationOptions>()), Times.Never);
+            collectionManager.Verify(m => m.AddToCollection(It.IsAny<long>(), It.IsAny<long[]>()), Times.Never);
+
+            // A subsequent, uncancelled run against the same (unaffected) library state reaches the
+            // correct end state - the earlier cancellation left nothing to heal, but the run still
+            // completes normally and produces the expected collection.
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+
+            collectionManager.Verify(
+                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o => o.Name == "Formel 1" && o.ItemIdList.Length == 1)),
+                Times.Once);
+            Assert.Single(result.Collections);
+            Assert.True(result.Collections[0].Created);
+        }
+
+        [Fact]
+        public async Task LargeLibrarySimulation_TenThousandItems_CompletesCorrectlyAndWithinABoundedTime()
+        {
+            // Issue #10 acceptance criterion: "simulate >= 10k items and document runtime/memory
+            // behavior". This is an in-memory algorithmic simulation, not a real Emby server under
+            // real I/O - see docs/performance-notes.md for the honest scope of what this does and
+            // does not validate. The mock below actually respects StartIndex/Limit (i.e. it paginates
+            // for real rather than returning everything on the first call), matching the realistic
+            // shape of a live ILibraryManager.GetItemList implementation, so this also exercises the
+            // paging loop itself rather than just the per-item matching cost.
+            const int itemCount = 12_000;
+            var allItems = new BaseItem[itemCount];
+            for (var i = 0; i < itemCount; i++)
+            {
+                // Every 7th item matches "Formel 1"; every 11th matches "heute-show"; the rest matches
+                // neither - a realistic mix of hits and misses across a large library.
+                string name;
+                if (i % 7 == 0)
+                {
+                    name = $"20260101 0100 - Sender HD - Formel 1 Rennen {i}";
+                }
+                else if (i % 11 == 0)
+                {
+                    name = $"20260101 0100 - Sender HD - heute-show extra {i}";
+                }
+                else
+                {
+                    name = $"20260101 0100 - Sender HD - Irrelevant Recording {i}";
+                }
+
+                allItems[i] = MakeItem(i, name);
+            }
+
+            var library = new Mock<ILibraryManager>();
+            library
+                .Setup(m => m.GetItemList(It.IsAny<InternalItemsQuery>()))
+                .Returns((InternalItemsQuery q) =>
+                {
+                    if (q.IncludeItemTypes != null && q.IncludeItemTypes.Contains("BoxSet"))
+                    {
+                        return Array.Empty<BaseItem>();
+                    }
+
+                    // Real pagination: only return the requested [StartIndex, StartIndex+Limit) slice,
+                    // exactly as a real ILibraryManager would for a paged query.
+                    var start = q.StartIndex ?? 0;
+                    var limit = q.Limit ?? allItems.Length;
+                    return allItems.Skip(start).Take(limit).ToArray();
+                });
+
+            var collectionManager = new Mock<ICollectionManager>();
+            collectionManager
+                .Setup(m => m.CreateCollection(It.IsAny<CollectionCreationOptions>()))
+                .ReturnsAsync((CollectionCreationOptions o) => new BoxSet { Name = o.Name, InternalId = 9999 });
+            collectionManager
+                .Setup(m => m.AddToCollection(It.IsAny<long>(), It.IsAny<long[]>()))
+                .Returns(Task.CompletedTask);
+
+            var logger = new Mock<ILogger>();
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[]
+                {
+                    Rule("Formel 1", RuleMatchType.Regex, @"(?i)\bformel\s*1\b"),
+                    Rule("heute-show", RuleMatchType.Regex, @"(?i)\bheute[- ]show\b"),
+                    Rule("Irrelevant Catch-All", RuleMatchType.Contains, "Irrelevant Recording")
+                }
+            };
+
+            var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
+
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+            stopwatch.Stop();
+
+            Assert.Equal(itemCount, result.ItemsScanned);
+            Assert.Equal(0, result.ItemsSkippedNoTitle);
+
+            var expectedFormel1 = Enumerable.Range(0, itemCount).Count(i => i % 7 == 0);
+            var expectedHeuteShow = Enumerable.Range(0, itemCount).Count(i => i % 7 != 0 && i % 11 == 0);
+            var expectedIrrelevant = itemCount - expectedFormel1 - expectedHeuteShow;
+
+            Assert.Equal(expectedFormel1, result.RuleHitCounts["Formel 1"]);
+            Assert.Equal(expectedHeuteShow, result.RuleHitCounts["heute-show"]);
+            Assert.Equal(expectedIrrelevant, result.RuleHitCounts["Irrelevant Catch-All"]);
+            Assert.Equal(3, result.Collections.Count);
+            Assert.Empty(result.Errors);
+
+            // Regression guard against something accidentally becoming quadratic: this is a generous
+            // bound (a correctly-behaving run of this size takes well under a second on typical CI
+            // hardware; observed wall-clock time is reported in the issue #10 write-up), not a tight
+            // performance assertion - it exists only to catch an O(n^2) (or worse) regression, not to
+            // benchmark the implementation.
+            Assert.True(
+                stopwatch.Elapsed < TimeSpan.FromSeconds(10),
+                $"Sync of {itemCount} items took {stopwatch.Elapsed}, which is suspiciously slow - possible algorithmic regression.");
+        }
     }
 }
