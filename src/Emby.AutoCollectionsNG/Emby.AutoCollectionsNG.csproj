@@ -13,6 +13,9 @@
 
   <ItemGroup>
     <PackageReference Include="MediaBrowser.Server.Core" Version="4.9.1.90" />
+    <!-- Required to resolve MediaBrowser.Model.Logging.ILogger's ReadOnlyMemory<char> overloads,
+         which aren't part of the netstandard2.0 base class library. -->
+    <PackageReference Include="System.Memory" Version="4.6.3" />
   </ItemGroup>
 
 </Project>
