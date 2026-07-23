@@ -78,17 +78,16 @@ Source: reflection against `mediabrowser.server.core` 4.9.1.90.
 | `MediaBrowser.Controller.Entities.Movies.Movie` | ✅ | extends `Video`; implements `ISupportsBoxSetGrouping` (movie-specific auto-grouping — **not** required for manual `AddToCollection`) |
 | `MediaBrowser.Controller.Entities.TV.Episode`, `MediaBrowser.Controller.Entities.Video` | ✅ | both extend `BaseItem`/`Video`; **no type restriction visible on `AddToCollection`'s signature itself** — it takes plain `long[]` IDs regardless of item type |
 
-**❓ OPEN SPIKE (#3) — reflection can't answer this, needs a live server:**
-The interface signatures place no compile-time restriction on which item
-types can be added to a collection (recordings included), and `BoxSet` is
-architecturally just a `Folder`. That is reasonably strong static evidence
-the API itself doesn't block recordings. What reflection **cannot** confirm:
-whether the Emby **web UI** renders a BoxSet containing `Video`/`Episode`-typed
-recordings the same way it renders a movie collection, and whether Live
-TV/DVR recordings specifically (as opposed to a `.ts` file resolved as a
-plain `Video`) behave differently. This needs an actual Emby server with
-sample recordings — track the result here once available. Fallback:
-`IPlaylistManager` (see below).
+**Decision (#3):** primary sync target is `ICollectionManager`/`BoxSet`.
+Reflection shows no compile-time restriction on which item types can be
+added to a collection, and `BoxSet` is architecturally just a `Folder`. That
+is reasonably strong static evidence the API itself doesn't block
+recordings — but it does **not** confirm runtime/UI behavior. **❓ Genuinely
+open, needs a live server:** whether the Emby web UI renders a BoxSet
+containing `Video`/`Episode`-typed recordings the same way it renders a
+movie collection, and whether Live TV/DVR recordings specifically behave
+differently from a plain resolved `Video`. Full writeup and the fallback
+plan (`IPlaylistManager`) are in [`docs/api-notes.md`](api-notes.md).
 
 Sources: reflection against `mediabrowser.server.core` 4.9.1.90 (this session);
 Emby community "Get/Create Collections Plugin Service"; Jellyfin

@@ -34,10 +34,14 @@ own: mass events during a library scan, possibly incomplete metadata on
 
 1. Whether Emby collections (BoxSets) accept recordings/`.ts` videos and
    display them correctly in the UI — collections are primarily designed for
-   movies. Fallback: playlists (`IPlaylistManager`) or tag-based filters.
+   movies. **Resolved as far as possible without a live server:** static API
+   evidence (reflection) shows no restriction, so `BoxSet` is the primary
+   target; live UI rendering is still unverified. See
+   [`docs/api-notes.md`](api-notes.md). Fallback: playlists
+   (`IPlaylistManager`).
 2. Whether the declarative plugin UI (auto-generated from the config model)
    supports list editing and action buttons — fallback: classic embedded HTML
-   configuration page.
+   configuration page. Still open, addressed in #9.
 
 ## Work packages (order = processing sequence)
 
