@@ -17,3 +17,6 @@ artifacts/
 
 ## Claude Code tooling state (agent worktrees, local session data)
 .claude/
+
+## Local secrets
+.env
