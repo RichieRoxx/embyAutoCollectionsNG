@@ -207,6 +207,12 @@ silently fail to open (menu link does nothing / blank view):
 - **Plugin config is served as JSON with PascalCase keys** (matching the C#
   property names). Enum representation was not pinned down, so the controller
   still reads enums tolerantly (string name or numeric index).
+- **Gotcha: `PluginPageInfo.IsMainConfigPage` defaults to `true`.** A
+  secondary resource entry (like the controller JS) MUST set
+  `IsMainConfigPage = false` (and `EnableInMainMenu = false`) explicitly, or
+  the dashboard treats it as an additional main config page / menu entry.
+  Confirmed by unit test against the real SDK type (an unset flag came back
+  `true`).
 
 This is implemented in `Configuration/configPage.html` (root `class="view"`
 + `data-controller`) and `Configuration/configPage.js` (the AMD controller),

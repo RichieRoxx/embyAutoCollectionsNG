@@ -66,7 +66,13 @@ namespace Emby.AutoCollectionsNG
             {
                 // MUST match data-controller="__plugin/autocollectionsngjs" in configPage.html.
                 Name = "autocollectionsngjs",
-                EmbeddedResourcePath = "Emby.AutoCollectionsNG.Configuration.configPage.js"
+                EmbeddedResourcePath = "Emby.AutoCollectionsNG.Configuration.configPage.js",
+                // This resource is the controller JS, not a page in its own right. IsMainConfigPage
+                // and EnableInMainMenu must be set false EXPLICITLY: in this SDK version
+                // PluginPageInfo.IsMainConfigPage defaults to true, so leaving it unset would make
+                // the dashboard treat the .js file as a second main config page / menu entry.
+                IsMainConfigPage = false,
+                EnableInMainMenu = false
             };
         }
     }
