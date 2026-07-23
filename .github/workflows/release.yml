@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Test
+        run: dotnet test --configuration Release
+
+      - name: Publish plugin
+        run: |
+          dotnet publish src/Emby.AutoCollectionsNG/Emby.AutoCollectionsNG.csproj \
+            -c Release \
+            -o publish
+
+      - name: Package release archive
+        run: |
+          mkdir -p package
+          # Ship the plugin itself plus only the small compatibility shim DLLs it needs
+          # (see README "Known limitations" / docs/emby-api-cheatsheet.md for why System.Memory
+          # is required). The MediaBrowser.*.dll / Emby.*.dll files `dotnet publish` also copies
+          # are provided by the Emby host itself and must NOT be bundled - shipping them could
+          # shadow the host's own versions.
+          cp publish/Emby.AutoCollectionsNG.dll package/
+          cp publish/System.Memory.dll package/
+          cp publish/System.Buffers.dll package/
+          cp publish/System.Numerics.Vectors.dll package/
+          cp publish/System.Runtime.CompilerServices.Unsafe.dll package/
+          cd package
+          zip -r "../Emby.AutoCollectionsNG-${GITHUB_REF_NAME}.zip" .
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Emby.AutoCollectionsNG-${{ github.ref_name }}.zip
+          generate_release_notes: true
