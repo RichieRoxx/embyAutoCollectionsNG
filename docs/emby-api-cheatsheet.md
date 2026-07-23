@@ -130,12 +130,34 @@ throwaway reflection probe, this session, for issue #7).
 
 ## Configuration UI
 
-| Approach | Status | Note |
+| Element | Status | Signature |
 |---|---|---|
-| Declarative plugin UI (auto-generated from config model) | ❓ | attributes like `[DisplayName]`, `[Description]`; **unclear** whether it supports editable lists, action buttons, and dynamic dropdowns (#9) — not reflectable, needs live-server/dashboard testing |
-| Classic embedded HTML configuration page | ⚠️ | fallback: `IHasWebPages`/embedded resource + JS `ApiClient` pattern; verify against example plugins |
+| `MediaBrowser.Model.Plugins.IHasWebPages` | ✅ | `IEnumerable<PluginPageInfo> GetPages()` — implement on `Plugin` to register pages |
+| `MediaBrowser.Model.Plugins.PluginPageInfo` | ✅ | class; `Name` (string), `DisplayName` (string), `EmbeddedResourcePath` (string — matches an `<EmbeddedResource>` in the csproj), `EnableInMainMenu`/`EnableInUserMenu` (bool), `MenuSection`/`FeatureId`/`MenuIcon` (string), `IsMainConfigPage` (bool) |
+| `MediaBrowser.Controller.Plugins.IPluginConfigurationPage` | ✅ | alternate/older interface: `Stream GetHtmlStream()`, `Name` (string), `ConfigurationPageType`, `Plugin` (`IPlugin`) |
 
-Source: dev.emby.media/doc/plugins/ui (UI rendering behavior can't be verified via reflection — needs a live dashboard).
+**Decision (#9):** `IHasWebPages` + an embedded-resource HTML/JS page is the
+confirmed, real mechanism — not a "declarative UI auto-generated from
+attributes" (that was an unverified assumption from documentation
+skimming, not something reflection found any evidence of; `PluginPageInfo`
+just points at a static HTML resource, so all UI markup/JS is authored by
+hand, same as any other embedded-HTML Emby plugin page). The
+`Emby.Web.GenericEdit.dll` assembly (shipped in the `mediabrowser.common`
+package) does exist and hints at some kind of generic property-editor
+support, but no interface found via reflection so far wires it into
+`IHasWebPages`/`PluginPageInfo` automatically — treat any generic-editor
+approach as unconfirmed unless someone finds and documents the actual
+connecting API. The hand-authored HTML/JS page against `IHasWebPages` is
+the path with real, confirmed signatures, so that's what #9 is built on.
+
+**Still open, needs a live server:** whether the embedded page actually
+renders/loads correctly end-to-end in the Emby dashboard (embedded resource
+naming/casing conventions, JS `ApiClient` availability in the page context)
+can't be confirmed via reflection or compilation — flag this the same way
+as the #3 spike if #9 can't be tested against a live server either.
+
+Source: reflection against `mediabrowser.server.core`/`mediabrowser.common`
+4.9.1.90 (this session, for issue #9); dev.emby.media/doc/plugins/ui.
 
 ## Logging
 
