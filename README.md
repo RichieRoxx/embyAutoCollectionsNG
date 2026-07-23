@@ -1,22 +1,22 @@
 # Emby Auto Collections NG
 
-Ein Emby-**Server-Plugin**, das Collections automatisch anhand konfigurierbarer
-Titel-Regeln (Regex oder Contains) pflegt — primär für **TV-Aufnahmen** vom
-OpenViX/Vu+ Receiver. Vollständig lokal: keine Cloud, keine Online-Metadaten,
-keine offenen Ports.
+An Emby **server plugin** that automatically maintains collections based on
+configurable title rules (regex or contains) — primarily for **TV recordings**
+from an OpenViX/Vu+ receiver. Fully local: no cloud, no online metadata, no
+open ports.
 
-> **Status:** In Entwicklung. Die Arbeit ist in GitHub-Issues #1–#11 zerlegt;
-> aktuell steht das Fundament (Planung & Guardrails). Siehe
-> [`docs/PLAN.md`](docs/PLAN.md) für den Fahrplan.
+> **Status:** In development. Work is broken down into GitHub issues #1–#11;
+> currently the foundation (planning & guardrails) is in place. See
+> [`docs/PLAN.md`](docs/PLAN.md) for the roadmap.
 
-## Wozu?
+## Why?
 
-Emby hat Collections nativ, aber auf Movie-/TMDb-Collections ausgelegt. Für lokale
-Aufnahmen möchte man stattdessen **dynamische, regelbasierte** Collections wie
-„Formel 1", „heute-show" oder „ZDF Magazin Royale", die sich automatisch aus dem
-Titel der Items befüllen — ohne Items manuell zuzuordnen.
+Emby has native collections, but they're built for movie/TMDb collections. For
+local recordings, what's needed instead is **dynamic, rule-based** collections
+like "Formel 1", "heute-show", or "ZDF Magazin Royale" that populate
+automatically from item titles — without manually assigning items.
 
-Beispiel-Dateinamen solcher Aufnahmen:
+Example filenames of such recordings:
 
 ```
 20260705 1742 - ORF 1 HD - Formel 1 Großer Preis von Großbritannien 2026.ts
@@ -24,44 +24,44 @@ Beispiel-Dateinamen solcher Aufnahmen:
 20260627 0012 - ZDF HD - ZDF Magazin Royale.ts
 ```
 
-## Funktionen (Zielbild)
+## Features (target)
 
-- Collections automatisch anlegen und pflegen (erstellen, aktualisieren, optional
-  leere löschen).
-- Regeln mit: Collection-Name, Match-Typ (`regex`/`contains`), Pattern, optional
-  Case-Sensitivity, Enabled-Flag, Library-Filter, Item-Typ-Filter.
-- Matching auf den **Emby-Item-Titel** (nicht nur den Dateinamen), optional
-  zusätzlich auf Dateiname/Pfad als Fallback.
-- **Titel-Normalisierung** für Receiver-Aufnahmen: führendes Datum/Uhrzeit entfernen,
-  Senderpräfix entfernen, Unicode/Whitespace normalisieren. Zweistufiges Matching
-  (Rohtitel → normalisierter Titel).
-- **Idempotenter** Abgleich: mehrfaches Ausführen erzeugt keine Duplikate.
-- Ausführung **periodisch** (Scheduled Task) **und manuell** (Dashboard-Task bzw.
-  UI-Button), optional zusätzlich ausgelöst durch Library-Änderungen.
-- Aussagekräftiges Logging: Treffer pro Regel, Änderungen pro Collection, Fehler
-  mit Kontext.
+- Automatically create and maintain collections (create, update, optionally
+  delete empty ones).
+- Rules with: collection name, match type (`regex`/`contains`), pattern,
+  optional case sensitivity, enabled flag, library filter, item type filter.
+- Matching against the **Emby item title** (not just the filename), optionally
+  also against filename/path as a fallback.
+- **Title normalization** for receiver recordings: strip leading date/time,
+  strip channel prefix, normalize Unicode/whitespace. Two-stage matching
+  (raw title → normalized title).
+- **Idempotent** sync: running it repeatedly never creates duplicates.
+- Runs **periodically** (scheduled task) **and** on demand (dashboard task or
+  UI button), optionally also triggered by library changes.
+- Meaningful logging: hits per rule, changes per collection, errors with
+  context.
 
-## Architektur (Kurzfassung)
+## Architecture (summary)
 
-Drei Bausteine des Emby-Plugin-Modells:
+Three building blocks of the Emby plugin model:
 
-| Baustein | Emby-Mechanismus | Zweck |
+| Building block | Emby mechanism | Purpose |
 |---|---|---|
-| Server-Plugin | `BasePlugin<TConfig>` + `BasePluginConfiguration` | Basis, Konfiguration, Admin-UI |
-| Scheduled Task | `IScheduledTask` | periodischer Sync + manueller Trigger |
-| Event-Hook (optional) | `IServerEntryPoint` + `ILibraryManager`-Events | Sync nach Library-Änderungen (mit Debounce) |
+| Server plugin | `BasePlugin<TConfig>` + `BasePluginConfiguration` | base, configuration, admin UI |
+| Scheduled task | `IScheduledTask` | periodic sync + manual trigger |
+| Event hook (optional) | `IServerEntryPoint` + `ILibraryManager` events | sync after library changes (with debounce) |
 
-**Timer vs. Trigger:** Hybrid. Der Scheduled Task ist die primäre, robuste
-Ausführungsform; ein eventbasierter Trigger mit Debounce-Fenster ergänzt ihn für
-schnellere Reaktion auf neue Aufnahmen. Begründung und Details in
+**Timer vs. trigger:** hybrid. The scheduled task is the primary, robust
+execution mode; an event-based trigger with a debounce window complements it
+for faster reaction to new recordings. Rationale and details in
 [`docs/PLAN.md`](docs/PLAN.md).
 
-## Konfigurationsmodell
+## Configuration model
 
-Regeln werden als Liste in der Plugin-Konfiguration gepflegt (Emby persistiert diese
-als XML; eine UI zum Bearbeiten folgt). Beispielregeln:
+Rules are maintained as a list in the plugin configuration (Emby persists this
+as XML; an editing UI is planned). Example rules:
 
-| Collection | Typ | Pattern |
+| Collection | Type | Pattern |
 |---|---|---|
 | Formel 1 | regex | `(?i)\bformel\s*1\b` |
 | heute-show | regex | `(?i)\bheute[- ]show\b` |
@@ -71,43 +71,44 @@ als XML; eine UI zum Bearbeiten folgt). Beispielregeln:
 
 ## Build
 
-> Wird konkret, sobald das Projektgerüst (Issue #2) steht.
+> Will become concrete once the project skeleton (issue #2) is in place.
 
 ```bash
-dotnet build -c Release     # erzeugt die Plugin-DLL
-dotnet test                 # Unit-Tests (Matching-Engine, Config-Roundtrip)
+dotnet build -c Release     # produces the plugin DLL
+dotnet test                 # unit tests (matching engine, config round-trip)
 ```
 
-- Sprache/Runtime: C#, Target `netstandard2.0`
-- Server-Abhängigkeit: NuGet `mediabrowser.server.core` (4.8.x)
+- Language/runtime: C#, target `netstandard2.0`
+- Server dependency: NuGet `mediabrowser.server.core` (4.8.x)
 
 ## Installation
 
-1. Plugin bauen bzw. die Release-DLL herunterladen.
-2. DLL in den `plugins`-Ordner des Emby-Servers kopieren:
+1. Build the plugin or download the release DLL.
+2. Copy the DLL into the Emby server's `plugins` folder:
    - Windows: `%AppData%\Emby-Server\plugins`
-   - Linux: typischerweise `/var/lib/emby/plugins`
+   - Linux: typically `/var/lib/emby/plugins`
    - Docker: `/config/plugins`
-3. Emby-Server neu starten. Das Plugin erscheint im Dashboard unter *Plugins*.
-4. Regeln konfigurieren und den Sync über die *Geplanten Aufgaben* (bzw. den
-   UI-Button) auslösen.
+3. Restart the Emby server. The plugin appears in the dashboard under
+   *Plugins*.
+4. Configure rules and trigger the sync via *Scheduled Tasks* (or the UI
+   button).
 
-## Bekannte Einschränkungen / offene Punkte
+## Known limitations / open items
 
-- **Collections für Recordings:** Emby-Collections (BoxSets) sind primär für Movies
-  gedacht. Ob sie Aufnahmen (`.ts`) sauber aufnehmen und in der UI korrekt anzeigen,
-  wird in einem Spike (Issue #3) verifiziert; Fallbacks (Playlists oder Tags) sind
-  im Design vorgesehen.
-- **Konfigurations-UI:** Ob das deklarative Emby-Plugin-UI editierbare Regel-Listen
-  und Action-Buttons unterstützt, ist noch offen (Issue #9); Fallback ist eine
-  klassische eingebettete HTML-Seite.
+- **Collections for recordings:** Emby collections (BoxSets) are primarily
+  designed for movies. Whether they cleanly accept recordings (`.ts`) and
+  display them correctly in the UI will be verified in a spike (issue #3);
+  fallbacks (playlists or tags) are accounted for in the design.
+- **Configuration UI:** Whether the declarative Emby plugin UI supports
+  editable rule lists and action buttons is still open (issue #9); the
+  fallback is a classic embedded HTML page.
 
-Der jeweils aktuelle Stand dieser Punkte steht in
+The current status of these points is tracked in
 [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md).
 
-## Für Mitwirkende / Coding-Agents
+## For contributors / coding agents
 
-Verbindliche Leitplanken (u. a. „keine Fantasie-APIs", Idempotenz, Reihenfolge der
-Arbeitspakete) stehen in [`CLAUDE.md`](CLAUDE.md). Die verifizierte Emby-API-Oberfläche
-in [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md). Fahrplan in
+Binding guardrails (e.g. "no fantasy APIs", idempotency, work package order)
+live in [`CLAUDE.md`](CLAUDE.md). The verified Emby API surface is in
+[`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md). Roadmap in
 [`docs/PLAN.md`](docs/PLAN.md).

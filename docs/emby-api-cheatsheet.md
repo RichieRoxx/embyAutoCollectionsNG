@@ -1,82 +1,85 @@
-# Emby-API-Cheatsheet (verifizierte Oberfläche)
+# Emby API Cheat Sheet (verified surface)
 
-Zweck: **Fantasie-APIs verhindern.** Hier stehen nur Interfaces/Methoden, deren
-Existenz belegt ist. Signaturen können je nach `mediabrowser.server.core`-Version
-minimal abweichen — beim Implementieren gegen die tatsächlich referenzierte
-NuGet-Version prüfen und Abweichungen hier korrigieren.
+Purpose: **prevent fantasy APIs.** Only interfaces/methods with confirmed
+existence are listed here. Signatures may differ slightly depending on the
+`mediabrowser.server.core` version — verify against the actually referenced
+NuGet version when implementing, and correct this file if it deviates.
 
-Status-Legende: ✅ belegt · ⚠️ plausibel, aber gegen SDK zu verifizieren · ❓ offen (Spike)
+Status legend: ✅ confirmed · ⚠️ plausible, but needs verification against the SDK · ❓ open (spike)
 
-## Plugin-Basis
+## Plugin basics
 
-| Element | Status | Notiz |
+| Element | Status | Note |
 |---|---|---|
-| `BasePlugin<TConfig>` | ✅ | Basisklasse des Plugins; Ctor `(IApplicationPaths, IXmlSerializer)`; `Id`-GUID überschreiben |
-| `BasePluginConfiguration` | ✅ | Basisklasse der Konfiguration; wird als XML im `config`-Ordner persistiert |
-| `IServerEntryPoint` | ✅ | Einstiegspunkt für Initialisierung/Event-Hooks; `Run()` + `Dispose()` |
-| Dependency Injection | ✅ | Services über Konstruktor injizieren (z. B. `ILibraryManager`, `ILogger`) |
+| `BasePlugin<TConfig>` | ✅ | plugin base class; ctor `(IApplicationPaths, IXmlSerializer)`; override `Id` GUID |
+| `BasePluginConfiguration` | ✅ | configuration base class; persisted as XML in the `config` folder |
+| `IServerEntryPoint` | ✅ | entry point for initialization/event hooks; `Run()` + `Dispose()` |
+| Dependency injection | ✅ | inject services via constructor (e.g. `ILibraryManager`, `ILogger`) |
 
-Quellen: dev.emby.media/doc/plugins/dev, MediaBrowser/Emby Wiki „How to build a Server Plugin".
+Sources: dev.emby.media/doc/plugins/dev, MediaBrowser/Emby wiki "How to build
+a Server Plugin".
 
-## Items abfragen
+## Querying items
 
-| Element | Status | Notiz |
+| Element | Status | Note |
 |---|---|---|
-| `ILibraryManager` | ✅ | zentraler Zugriff auf die Library |
-| `ILibraryManager.GetItemList(InternalItemsQuery)` | ✅ | liefert Items; Filter über die Query |
-| `InternalItemsQuery` | ✅ | Filter-Objekt; u. a. `IncludeItemTypes`, `Limit`, `StartIndex`, `Recursive`, `DtoOptions` |
-| Paging über `Limit`/`StartIndex` | ⚠️ | für große Libraries chunked abfragen; Property-Namen gegen SDK prüfen |
+| `ILibraryManager` | ✅ | central access to the library |
+| `ILibraryManager.GetItemList(InternalItemsQuery)` | ✅ | returns items; filtering via the query |
+| `InternalItemsQuery` | ✅ | filter object; includes `IncludeItemTypes`, `Limit`, `StartIndex`, `Recursive`, `DtoOptions` |
+| Paging via `Limit`/`StartIndex` | ⚠️ | query in chunks for large libraries; verify property names against the SDK |
 
-`InternalItemsQuery`-Felder je nach Version leicht unterschiedlich — vor Nutzung
-im Objekt-Browser / SDK verifizieren. Quelle: `Emby.Server.Implementations/Library/LibraryManager.cs`.
+`InternalItemsQuery` fields vary slightly by version — verify in the object
+browser / SDK before use. Source: `Emby.Server.Implementations/Library/LibraryManager.cs`.
 
 ## Collections
 
-| Element | Status | Notiz |
+| Element | Status | Note |
 |---|---|---|
-| `ICollectionManager` (`MediaBrowser.Controller.Collections`) | ✅ | Manager für BoxSets/Collections |
-| `CreateCollection(...)` | ✅ | erstellt Collection; exakte Options-/Parameterform gegen SDK prüfen |
-| `AddToCollection(collectionId, itemIds)` | ✅ | Items hinzufügen; genaue Typen (Guid vs. string/long) gegen SDK prüfen |
-| `RemoveFromCollection(collectionId, itemIds)` | ✅ | Items entfernen |
-| Events `ItemsAddedToCollection` / `ItemsRemovedToCollection` / `CollectionCreated` | ⚠️ | existieren im CollectionManager; für Vermeidung von Sync-Schleifen relevant |
-| BoxSets abfragen | ⚠️ | via `InternalItemsQuery` mit `IncludeItemTypes = ["BoxSet"]`; Kinder/Mitglieder gegen SDK prüfen |
+| `ICollectionManager` (`MediaBrowser.Controller.Collections`) | ✅ | manager for BoxSets/collections |
+| `CreateCollection(...)` | ✅ | creates a collection; verify exact options/parameter shape against the SDK |
+| `AddToCollection(collectionId, itemIds)` | ✅ | adds items; verify exact types (Guid vs. string/long) against the SDK |
+| `RemoveFromCollection(collectionId, itemIds)` | ✅ | removes items |
+| Events `ItemsAddedToCollection` / `ItemsRemovedFromCollection` / `CollectionCreated` | ⚠️ | exist on the collection manager; relevant for avoiding sync loops |
+| Querying BoxSets | ⚠️ | via `InternalItemsQuery` with `IncludeItemTypes = ["BoxSet"]`; verify children/members against the SDK |
 
-**❓ OFFENER SPIKE (#3):** Ob `ICollectionManager` Recordings/`.ts`-Videos
-(Item-Typ je nach Library `Movie`/`Video`/`Episode`) aufnimmt und die Emby-UI diese
-Collection korrekt anzeigt, ist **nicht bestätigt**. Ergebnis + finale Signaturen
-hier eintragen. Fallbacks: `IPlaylistManager` (Playlists) oder Tag-basiert.
+**❓ OPEN SPIKE (#3):** Whether `ICollectionManager` accepts recordings/`.ts`
+videos (item type depends on library: `Movie`/`Video`/`Episode`) and whether
+the Emby UI displays such a collection correctly is **not confirmed**. Record
+the result and final signatures here. Fallbacks: `IPlaylistManager` (playlists)
+or a tag-based approach.
 
-Quellen: Emby-Community „Get/Create Collections Plugin Service", Jellyfin
-`CollectionManager.cs` (API-verwandt, aber **nicht** 1:1 identisch — nicht blind übernehmen).
+Sources: Emby community "Get/Create Collections Plugin Service", Jellyfin
+`CollectionManager.cs` (API-related, but **not** identical 1:1 — do not copy
+blindly).
 
-## Scheduled Tasks
+## Scheduled tasks
 
-| Element | Status | Notiz |
+| Element | Status | Note |
 |---|---|---|
 | `IScheduledTask` | ✅ | `Name`/`Description`/`Category`, `Execute(...)`, `GetDefaultTriggers()` |
-| Automatic Type Discovery | ✅ | Task-Klasse public im Plugin-Assembly ⇒ wird gefunden |
-| `ITaskManager` | ✅ | Task programmatisch triggern (für UI-Button #9 und Event-Trigger #8) |
-| Progress/CancellationToken in `Execute` | ⚠️ | Signatur gegen SDK prüfen (i. d. R. `IProgress<double>` + `CancellationToken`) |
+| Automatic type discovery | ✅ | task class public in the plugin assembly ⇒ gets discovered |
+| `ITaskManager` | ✅ | trigger the task programmatically (for UI button #9 and event trigger #8) |
+| Progress/CancellationToken in `Execute` | ⚠️ | verify signature against the SDK (typically `IProgress<double>` + `CancellationToken`) |
 
-Quelle: dev.emby.media/reference `ITaskManager`, Emby „Scheduled Tasks".
+Sources: dev.emby.media/reference `ITaskManager`, Emby "Scheduled Tasks".
 
-## Konfigurations-UI
+## Configuration UI
 
-| Weg | Status | Notiz |
+| Approach | Status | Note |
 |---|---|---|
-| Deklaratives Plugin-UI (autogeneriert aus Config-Model) | ❓ | Attribute wie `[DisplayName]`, `[Description]`; **unklar**, ob editierbare Listen + Action-Buttons + dynamische Dropdowns unterstützt werden (#9) |
-| Klassische eingebettete HTML-Konfigseite | ⚠️ | Fallback: `IHasWebPages`/embedded resource + JS `ApiClient`-Pattern; gegen Beispiel-Plugins verifizieren |
+| Declarative plugin UI (auto-generated from config model) | ❓ | attributes like `[DisplayName]`, `[Description]`; **unclear** whether it supports editable lists, action buttons, and dynamic dropdowns (#9) |
+| Classic embedded HTML configuration page | ⚠️ | fallback: `IHasWebPages`/embedded resource + JS `ApiClient` pattern; verify against example plugins |
 
-Quelle: dev.emby.media/doc/plugins/ui.
+Source: dev.emby.media/doc/plugins/ui.
 
 ## Logging
 
-| Element | Status | Notiz |
+| Element | Status | Note |
 |---|---|---|
-| `ILogger` (Emby-SDK) | ✅ | via DI; Info = Zahlen/Zusammenfassung, Debug = Item-Details |
+| `ILogger` (Emby SDK) | ✅ | via DI; Info = numbers/summary, Debug = item details |
 
 ---
 
-**Pflege dieser Datei:** Wer eine ⚠️/❓-Zeile verifiziert, ändert den Status auf ✅
-und ergänzt die konkrete Signatur samt Quelle. Nichts hier eintragen, das nicht
-belegt ist.
+**Maintaining this file:** whoever verifies a ⚠️/❓ row changes the status to
+✅ and adds the concrete signature plus source. Do not add anything here that
+isn't confirmed.

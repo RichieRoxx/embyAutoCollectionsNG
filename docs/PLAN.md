@@ -1,60 +1,62 @@
-# Planung: Regex-basierte Auto-Collections für Emby-Recordings
+# Plan: Regex-based Auto Collections for Emby Recordings
 
-Dieses Dokument fasst die Architektur-Analyse und den Arbeitsplan zusammen.
-Die Arbeitspakete sind als GitHub-Issues angelegt; das Epic [#1](https://github.com/RichieRoxx/embyAutoCollectionsNG/issues/1)
-ist die Übersicht.
+This document summarizes the architecture analysis and the work plan.
+The work packages are tracked as GitHub issues; the epic
+[#1](https://github.com/RichieRoxx/embyAutoCollectionsNG/issues/1) is the
+overview.
 
-## Architektur
+## Architecture
 
-Das Plugin besteht aus drei Bausteinen:
+The plugin consists of three building blocks:
 
-| Baustein | Emby-Mechanismus | Zweck |
+| Building block | Emby mechanism | Purpose |
 |---|---|---|
-| Server-Plugin | `BasePlugin<TConfig>` + `BasePluginConfiguration` | Basis, Konfiguration, Admin-UI |
-| Scheduled Task | `IScheduledTask` | periodischer Sync + manueller Trigger übers Dashboard |
-| Event-Hook (optional) | `IServerEntryPoint` + `ILibraryManager`-Events | Sync nach Library-Änderungen, mit Debounce |
+| Server plugin | `BasePlugin<TConfig>` + `BasePluginConfiguration` | base, configuration, admin UI |
+| Scheduled task | `IScheduledTask` | periodic sync + manual trigger via dashboard |
+| Event hook (optional) | `IServerEntryPoint` + `ILibraryManager` events | sync after library changes, with debounce |
 
-**Timer vs. Trigger:** Hybrid-Ansatz. Der Scheduled Task ist die primäre, robuste
-Ausführungsform (MVP); ein eventbasierter Trigger mit Debounce-Fenster kommt als
-Ergänzung dazu (Issue #8). Ein rein eventbasierter Ansatz ist als alleinige Lösung
-fragil: Massenevents beim Library-Scan, evtl. unfertige Metadaten bei `ItemAdded`,
-und Regeländerungen lösen keine Events aus.
+**Timer vs. trigger:** hybrid approach. The scheduled task is the primary,
+robust execution mode (MVP); an event-based trigger with a debounce window is
+added on top (issue #8). A purely event-based approach would be fragile on its
+own: mass events during a library scan, possibly incomplete metadata on
+`ItemAdded`, and rule changes that don't trigger any event at all.
 
-## Verifizierte APIs
+## Verified APIs
 
-- NuGet `mediabrowser.server.core` (4.8.x), Target `netstandard2.0`
-- Items abfragen: `ILibraryManager.GetItemList(InternalItemsQuery)`
+- NuGet `mediabrowser.server.core` (4.8.x), target `netstandard2.0`
+- Querying items: `ILibraryManager.GetItemList(InternalItemsQuery)`
 - Collections: `ICollectionManager` (`MediaBrowser.Controller.Collections`)
-  mit `CreateCollection` / `AddToCollection` / `RemoveFromCollection`
-- Tasks: `IScheduledTask`, manuell via Dashboard oder `ITaskManager`
-- Deployment: Plugin-DLL in den `plugins`-Ordner des Servers, Neustart
+  with `CreateCollection` / `AddToCollection` / `RemoveFromCollection`
+- Tasks: `IScheduledTask`, manually via dashboard or `ITaskManager`
+- Deployment: plugin DLL into the server's `plugins` folder, restart
 
-## Offene Unsicherheiten (Spike, Issue #3)
+## Open uncertainties (spike, issue #3)
 
-1. Ob Emby-Collections (BoxSets) Recordings/`.ts`-Videos aufnehmen und in der UI
-   korrekt anzeigen — Collections sind primär für Movies gedacht.
-   Fallback: Playlists (`IPlaylistManager`) oder Tag-basierte Filter.
-2. Ob das deklarative Plugin-UI (autogeneriert aus dem Config-Model) Listen-Editing
-   und Action-Buttons unterstützt — Fallback: klassische eingebettete HTML-Konfigseite.
+1. Whether Emby collections (BoxSets) accept recordings/`.ts` videos and
+   display them correctly in the UI — collections are primarily designed for
+   movies. Fallback: playlists (`IPlaylistManager`) or tag-based filters.
+2. Whether the declarative plugin UI (auto-generated from the config model)
+   supports list editing and action buttons — fallback: classic embedded HTML
+   configuration page.
 
-## Arbeitspakete (Reihenfolge = Abarbeitung)
+## Work packages (order = processing sequence)
 
-| # | Issue | Typ | Abhängig von |
+| # | Issue | Type | Depends on |
 |---|---|---|---|
-| 1 | #2 Projektgerüst, Build & Deployment | setup | — |
-| 2 | #3 Spike: Collections für Recordings verifizieren | research | #2 |
-| 3 | #4 Konfigurationsmodell mit Regel-Liste | feature | #2 |
-| 4 | #5 Matching-Engine + Normalisierung + Tests | feature | #4 |
-| 5 | #6 Sync-Engine (idempotenter Abgleich) | feature | #3, #4, #5 |
-| 6 | #7 Scheduled Task + manueller Trigger | feature | #6 |
-| 7 | #8 Event-Trigger mit Debounce | enhancement | #7 |
-| 8 | #9 Konfigurations-UI + Sync-Button | ui | #4, #7 |
-| 9 | #10 Logging, Fehlerbehandlung, Robustheit | quality | #6, #7 |
-| 10 | #11 Packaging, Doku & Release | docs | alle |
+| 1 | #2 Project skeleton, build & deployment | setup | — |
+| 2 | #3 Spike: verify collections for recordings | research | #2 |
+| 3 | #4 Configuration model with rule list | feature | #2 |
+| 4 | #5 Matching engine + normalization + tests | feature | #4 |
+| 5 | #6 Sync engine (idempotent reconciliation) | feature | #3, #4, #5 |
+| 6 | #7 Scheduled task + manual trigger | feature | #6 |
+| 7 | #8 Event trigger with debounce | enhancement | #7 |
+| 8 | #9 Configuration UI + sync button | ui | #4, #7 |
+| 9 | #10 Logging, error handling, robustness | quality | #6, #7 |
+| 10 | #11 Packaging, docs & release | docs | all |
 
-**MVP = Issues #2–#7** (Regeln per Config, periodischer + manueller Sync).
+**MVP = issues #2–#7** (rules via config, periodic + manual sync).
 
-## Referenzen
+## References
 
 - https://dev.emby.media/doc/plugins/index.html
 - https://dev.emby.media/doc/plugins/dev/index.html
