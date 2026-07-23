@@ -152,14 +152,71 @@ approach as unconfirmed unless someone finds and documents the actual
 connecting API. The hand-authored HTML/JS page against `IHasWebPages` is
 the path with real, confirmed signatures, so that's what #9 is built on.
 
-**Still open, needs a live server:** whether the embedded page actually
-renders/loads correctly end-to-end in the Emby dashboard (embedded resource
-naming/casing conventions, JS `ApiClient` availability in the page context)
-can't be confirmed via reflection or compilation — flag this the same way
-as the #3 spike if #9 can't be tested against a live server either.
+**VERIFIED end-to-end against a live Emby server (2026-07-23, server
+`4.9.x` on Synology; dashboard-ui source + the shipped MBBackup/XmlTV/Fanart
+plugin config pages inspected directly).** The dashboard's rendering contract
+for an `IHasWebPages` config page is **not** "any HTML gets injected and its
+inline `<script>` runs." It is specific, and getting it wrong makes the page
+silently fail to open (menu link does nothing / blank view):
+
+- **Root element must match `querySelector('.view, div[data-role="page"]')`.**
+  `viewmanager.loadView` → `normalizeNewView` does `div.innerHTML = html` then
+  `div.querySelector('.view, div[data-role="page"]')` and uses the result as
+  *the* view element. If the page's root has neither `class="view"` nor
+  `data-role="page"`, this returns `null` and the very next line
+  (`view.getAttribute("data-require")`) throws — the page never renders. Give
+  the root `class="view"` (Emby's own pages also add `is="emby-scroller"` +
+  scroller classes; a plain `<div class="view">` with a child `.content-primary`
+  is enough — the view manager upgrades it to a scroller automatically).
+- **Inline `<script>` does NOT execute.** Because the HTML is loaded via
+  `innerHTML`, any `<script>` in it is inert (browser spec). There is **no**
+  script re-execution anywhere in the dashboard-ui. All shipped Emby plugins
+  put their logic in a **separate JS module** referenced from the root element
+  via `data-controller="__plugin/<name>"`.
+- **`data-controller="__plugin/<name>"` → separate registered JS resource.**
+  The view manager strips `__plugin/`, calls
+  `pluginManager.getConfigurationResourceUrl(<name>)` →
+  `/emby/web/ConfigurationPage?name=<name>`, and `require()`s it as an **AMD
+  module** whose return value is a **view-controller constructor**. That route
+  only serves resources registered via `IHasWebPages`, so the JS must be a
+  **second `PluginPageInfo`** whose `Name` equals `<name>` (lowercase; e.g.
+  `autocollectionsngjs`). Serving content type is derived from the resource's
+  `.js` extension.
+- **Controller module shape** (confirmed from MBBackup's `embybackupjs`):
+  ```js
+  define(['baseView', /* 'loading', 'emby-input', ... as needed */], function (BaseView) {
+      function View(view, params) {           // view = the root .view element
+          BaseView.apply(this, arguments);     // BaseView sets this.view / this.params
+          // bind listeners via view.querySelector(...) here
+      }
+      Object.assign(View.prototype, BaseView.prototype);
+      View.prototype.onResume = function (options) {   // runs every time the page is shown
+          BaseView.prototype.onResume.apply(this, arguments);
+          // load config here
+      };
+      return View;                             // returned ctor is `new`-ed as the controller
+  });
+  ```
+  Instantiated as `new View(viewElement, params)` (see
+  `viewmanager.js`; `baseview.js` `BaseView(view, params){ this.view = view; this.params = params; ... }`).
+- **`ApiClient` config methods confirmed present and used exactly as assumed:**
+  `ApiClient.getPluginConfiguration(pluginId)` and
+  `ApiClient.updatePluginConfiguration(pluginId, config)` (both Promise-returning),
+  plus `ApiClient.getScheduledTasks()` / `ApiClient.startScheduledTask(id)` /
+  `ApiClient.getUrl(...)` / `ApiClient.ajax(...)`. `ApiClient` is a page global.
+- **Plugin config is served as JSON with PascalCase keys** (matching the C#
+  property names). Enum representation was not pinned down, so the controller
+  still reads enums tolerantly (string name or numeric index).
+
+This is implemented in `Configuration/configPage.html` (root `class="view"`
++ `data-controller`) and `Configuration/configPage.js` (the AMD controller),
+both registered in `Plugin.GetPages()`. The earlier version — a single HTML
+resource with a non-`.view` root and an inline `<script>` — is exactly why the
+config page would not open, and is the bug fixed here.
 
 Source: reflection against `mediabrowser.server.core`/`mediabrowser.common`
-4.9.1.90 (this session, for issue #9); dev.emby.media/doc/plugins/ui.
+4.9.1.90; **live server dashboard-ui + shipped-plugin inspection, 2026-07-23**;
+dev.emby.media/doc/plugins/ui.
 
 ## Logging
 

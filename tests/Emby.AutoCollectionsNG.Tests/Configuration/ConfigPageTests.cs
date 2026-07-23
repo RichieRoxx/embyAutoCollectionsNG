@@ -91,10 +91,50 @@ namespace Emby.AutoCollectionsNG.Tests.Configuration
                     Assert.False(string.IsNullOrWhiteSpace(html));
                     // Sanity checks that this is really the rule-editor page and not some other
                     // accidental embedded resource under the same path.
-                    Assert.Contains("<html", html, StringComparison.OrdinalIgnoreCase);
-                    Assert.Contains("ApiClient", html, StringComparison.Ordinal);
                     Assert.Contains("acngSaveBtn", html, StringComparison.Ordinal);
                     Assert.Contains("acngSyncBtn", html, StringComparison.Ordinal);
+
+                    // Rendering-contract checks (verified against a live Emby 4.9 server): the view
+                    // manager selects the page via querySelector('.view, div[data-role="page"]') and
+                    // loads the logic from the referenced controller module. If either of these
+                    // regresses, the page silently fails to open - which is the exact bug this
+                    // structure fixes - so lock them in.
+                    Assert.Contains("class=\"view\"", html, StringComparison.Ordinal);
+                    Assert.Contains("data-controller=\"__plugin/autocollectionsngjs\"", html, StringComparison.Ordinal);
+                    // The logic must NOT be an inline <script> (innerHTML-inserted scripts never run).
+                    Assert.DoesNotContain("<script", html, StringComparison.OrdinalIgnoreCase);
+                }
+            }
+        }
+
+        [Fact]
+        public void ConfigPage_ControllerJsResource_IsRegistered_Embedded_AndReferencedByHtml()
+        {
+            var plugin = CreatePlugin();
+            var pages = plugin.GetPages().ToList();
+
+            // The HTML's data-controller name must be registered as its own page, or the dashboard
+            // route /emby/web/ConfigurationPage?name=autocollectionsngjs (which only serves
+            // registered resources) can't hand the browser the controller module.
+            var jsPage = pages.Single(p => p.Name == "autocollectionsngjs");
+            Assert.False(jsPage.IsMainConfigPage);
+            Assert.Equal("Emby.AutoCollectionsNG.Configuration.configPage.js", jsPage.EmbeddedResourcePath);
+
+            var assembly = typeof(Plugin).Assembly;
+            Assert.Contains(jsPage.EmbeddedResourcePath, assembly.GetManifestResourceNames());
+
+            using (var stream = assembly.GetManifestResourceStream(jsPage.EmbeddedResourcePath))
+            {
+                Assert.NotNull(stream);
+                using (var reader = new StreamReader(stream))
+                {
+                    var js = reader.ReadToEnd();
+                    Assert.False(string.IsNullOrWhiteSpace(js));
+                    // Confirms this is the AMD controller module in the shape Emby require()s.
+                    Assert.Contains("define(", js, StringComparison.Ordinal);
+                    Assert.Contains("BaseView", js, StringComparison.Ordinal);
+                    Assert.Contains("return View", js, StringComparison.Ordinal);
+                    Assert.Contains("ApiClient", js, StringComparison.Ordinal);
                 }
             }
         }

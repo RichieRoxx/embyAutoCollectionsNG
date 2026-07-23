@@ -25,3 +25,27 @@ jobs:
 
       - name: Test
         run: dotnet test --no-restore --configuration Release
+
+      - name: Publish plugin
+        run: |
+          dotnet publish src/Emby.AutoCollectionsNG/Emby.AutoCollectionsNG.csproj \
+            -c Release \
+            -o publish
+
+      - name: Stage deployable plugin files
+        run: |
+          mkdir -p package
+          # Same filtered set the release workflow ships: the plugin plus only the small
+          # compatibility shim DLLs it needs. The MediaBrowser.*/Emby.* DLLs publish also copies
+          # are provided by the host and must NOT be shipped.
+          cp publish/Emby.AutoCollectionsNG.dll package/
+          cp publish/System.Memory.dll package/
+          cp publish/System.Buffers.dll package/
+          cp publish/System.Numerics.Vectors.dll package/
+          cp publish/System.Runtime.CompilerServices.Unsafe.dll package/
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin
+          path: package/

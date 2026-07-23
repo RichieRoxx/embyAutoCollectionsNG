@@ -35,6 +35,11 @@
          ConfigPageEmbeddedResourceTests, which loads the built assembly and asserts the resource
          is present under that exact name). -->
     <EmbeddedResource Include="Configuration\configPage.html" />
+    <!-- Controller module referenced by configPage.html via data-controller. Served through the
+         same ConfigurationPage-by-name route, so it must be embedded and registered in
+         Plugin.GetPages() (Name "autocollectionsngjs"). Resource name follows the same default
+         convention -> "Emby.AutoCollectionsNG.Configuration.configPage.js". -->
+    <EmbeddedResource Include="Configuration\configPage.js" />
   </ItemGroup>
 
 </Project>
