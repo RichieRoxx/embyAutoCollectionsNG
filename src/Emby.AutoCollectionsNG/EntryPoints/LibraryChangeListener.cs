@@ -46,11 +46,12 @@ namespace Emby.AutoCollectionsNG.EntryPoints
         public LibraryChangeListener(
             ILibraryManager libraryManager,
             ICollectionManager collectionManager,
+            IUserManager userManager,
             ITaskManager taskManager,
             ILogger logger)
             : this(
                 libraryManager,
-                BuildTaskTrigger(libraryManager, collectionManager, taskManager, logger),
+                BuildTaskTrigger(libraryManager, collectionManager, userManager, taskManager, logger),
                 () => Plugin.Instance.Configuration,
                 debounceWindowProvider: null,
                 logger: logger)
@@ -93,6 +94,7 @@ namespace Emby.AutoCollectionsNG.EntryPoints
         private static Action BuildTaskTrigger(
             ILibraryManager libraryManager,
             ICollectionManager collectionManager,
+            IUserManager userManager,
             ITaskManager taskManager,
             ILogger logger)
         {
@@ -101,7 +103,7 @@ namespace Emby.AutoCollectionsNG.EntryPoints
                 throw new ArgumentNullException(nameof(taskManager));
             }
 
-            var syncTask = new AutoCollectionsSyncTask(libraryManager, collectionManager, logger);
+            var syncTask = new AutoCollectionsSyncTask(libraryManager, collectionManager, userManager, logger);
             return () => taskManager.QueueScheduledTask(syncTask, new TaskOptions());
         }
 
