@@ -110,23 +110,69 @@ observation on Emby 4.9.5.0, 2026-07-24**.
 | `CollectionCreationOptions` | ✅ | `Name` (string), `ParentId` (long), `IsLocked` (bool), `ProviderIds`, `ItemIdList` (long[]), `UserIds` (long[]) |
 | Events `CollectionCreated` / `ItemsAddedToCollection` / `ItemsRemovedFromCollection` | ✅ | exist on `ICollectionManager`; relevant for avoiding sync loops in the event trigger (#8) |
 | `MediaBrowser.Controller.Entities.BoxSet` | ✅ | extends `Folder` (so it's a container); implements `IItemByName`; public parameterless ctor, `Name`/`InternalId`/`Parent` all publicly settable — constructible directly in unit tests without a live host |
-| Reading current members of a BoxSet | ✅ | `Folder.GetChildren(InternalItemsQuery)` (also `GetChildren(User)` / `GetRecursiveChildren()`) — **not virtual**, and on a `Folder`/`BoxSet` instance not attached to a live Emby host it always returns an empty array regardless of conceptual contents. Not testable directly; `CollectionSyncService` routes membership reads through an injectable delegate instead (see `docs/PLAN.md` #6). |
+| Reading current members of a BoxSet | ✅ | **Query `ILibraryManager.GetItemList` with `InternalItemsQuery.CollectionIds = new[] { boxSet.InternalId }`.** `Folder.GetChildren(...)` returns an empty array **even for a real BoxSet loaded from the live library** (a collection with 91 persisted members reported zero children), and `ParentIds` returns nothing either — collection membership is *linked children*, not filesystem children. Emby switched collection membership queries from `ListIds` to `CollectionIds` in 4.6. |
 | `MediaBrowser.Controller.Library.DeleteOptions` | ✅ | parameterless ctor; `DeleteFileLocation` (bool), `DeleteFromExternalProvider` (bool), `CollectionFolders` (`BaseItem[]`) — used with `ILibraryManager.DeleteItem(BaseItem, DeleteOptions)` to remove an empty collection |
 | `MediaBrowser.Model.Logging.ILogger` | ✅ | `Info/Warn/Debug/Error(string message, object[] paramList)` (i.e. `params object[]`, string-format style), `ErrorException(string, Exception, object[])`, `FatalException(...)`. **Gotcha:** also declares `ReadOnlyMemory<char>`-based overloads, which pulls in a transitive need for the `System.Memory` NuGet package even if you only call the `string`-based overloads — a netstandard2.0 project referencing this interface won't compile without it (see `Emby.AutoCollectionsNG.csproj`). **Packaging consequence (issue #11):** `dotnet publish` shows `System.Memory` itself transitively brings in `System.Buffers.dll`, `System.Numerics.Vectors.dll`, and `System.Runtime.CompilerServices.Unsafe.dll` — a plain `dotnet build` output folder does **not** include any of these (class libraries aren't copy-local by default), only `dotnet publish` does. All four must ship alongside `Emby.AutoCollectionsNG.dll` in the Emby `plugins` folder; the `MediaBrowser.*.dll`/`Emby.*.dll` files `publish` also copies must NOT be shipped since the Emby host provides those itself. Whether the host already has a compatible `System.Memory` loaded for its own use (making our copies redundant-but-harmless) vs. genuinely needing ours to load at all was not verified against a real server — see README "Known limitations". |
 | `MediaBrowser.Controller.Dto.DtoOptions` | ✅ | has a parameterless ctor plus `DtoOptions(bool allFields)` and `DtoOptions(ItemFields[] fields)`. `new DtoOptions(false)` compiles and runs, but **items then come back without `InternalId`/`Id`** — use `new DtoOptions(true)` whenever results are addressed by ID (see the ⚠️ note under "Querying items") |
 | `MediaBrowser.Controller.Entities.Movies.Movie` | ✅ | extends `Video`; implements `ISupportsBoxSetGrouping` (movie-specific auto-grouping — **not** required for manual `AddToCollection`) |
 | `MediaBrowser.Controller.Entities.TV.Episode`, `MediaBrowser.Controller.Entities.Video` | ✅ | both extend `BaseItem`/`Video`; **no type restriction visible on `AddToCollection`'s signature itself** — it takes plain `long[]` IDs regardless of item type |
 
+### ⚠️ `CreateCollection` fails by returning `null`, never by throwing
+
+**Verified end-to-end on a live Emby 4.9.5 server (2026-07-24).** The host does
+not report *any* reason when it refuses to create a collection: no exception, no
+server-side log line, and `Task<BoxSet>` simply completes with `null` while
+nothing is persisted. **Always check the returned BoxSet** — code that discards
+it reports a phantom success and then re-"creates" the same collection on every
+subsequent run.
+
+Two independent causes were observed, both producing that same silent `null`:
+
+1. **The `ItemIdList` must be non-empty.** Creating a collection with an empty
+   list returns `null`. (So "create empty, then populate via `AddToCollection`"
+   does not work as a workaround.)
+2. **Every item in `ItemIdList` must be an eligible type.** In particular
+   **`LiveTvProgram` items are silently rejected** — they are EPG/guide data, not
+   library content. If *all* candidates are `LiveTvProgram`, `CreateCollection`
+   returns `null`; and `AddToCollection` **accepts** them without error but never
+   persists the membership, so those items reappear as "to add" on every run and
+   quietly break idempotency. On a DVR setup guide entries vastly outnumber real
+   recordings (3409 vs 189 on the test server), so an unfiltered item query is
+   dominated by them.
+
+Also required in practice:
+
+- **Set `ParentId` explicitly** to the library's collections folder — the
+  `CollectionFolder` whose `CollectionType` is `"boxsets"` (identify it by that,
+  not by its display name, which is localizable). This mirrors the reference
+  plugin below.
+- An unfiltered `GetItemList` also returns library-structure items
+  (`AggregateFolder`, `UserRootFolder`, `CollectionFolder`, `UserView`, `Folder`)
+  and existing `BoxSet`s; none of these belong in an `ItemIdList` either.
+
+Confirmed working shape (`Episode`-typed DVR recordings, live server): create
+with `IsLocked = false`, `Name`, `ParentId` = boxsets folder `InternalId`, and a
+non-empty `ItemIdList` of eligible items. Result: collection created with its
+members, and a second run makes **zero** writes.
+
+`UserIds` is **not** required — passing it was tried and made no difference; the
+reference plugin does not set it.
+
+Reference implementation worth reading: [`luzmane/emby.kinopoisk.ru`](https://github.com/luzmane/emby.kinopoisk.ru)
+(`EmbyKinopoiskRu/ScheduledTasks/CreateKpCollectionsTask.cs` and
+`Helper/EmbyHelper.cs`) — a real Emby plugin that creates collections from a
+scheduled task, including `AddVirtualFolder` to create the collections folder
+when it is missing.
+
 **Decision (#3):** primary sync target is `ICollectionManager`/`BoxSet`.
 Reflection shows no compile-time restriction on which item types can be
 added to a collection, and `BoxSet` is architecturally just a `Folder`. That
 is reasonably strong static evidence the API itself doesn't block
-recordings — but it does **not** confirm runtime/UI behavior. **❓ Genuinely
-open, needs a live server:** whether the Emby web UI renders a BoxSet
-containing `Video`/`Episode`-typed recordings the same way it renders a
-movie collection, and whether Live TV/DVR recordings specifically behave
-differently from a plain resolved `Video`. Full writeup and the fallback
-plan (`IPlaylistManager`) are in [`docs/api-notes.md`](api-notes.md).
+recordings. **✅ Confirmed on a live server (2026-07-24):** BoxSets holding
+`Episode`-typed DVR recordings are created, persisted and shown in the Emby web
+UI, so the fallback plan (`IPlaylistManager`, see
+[`docs/api-notes.md`](api-notes.md)) is not needed. The one real type
+restriction found is `LiveTvProgram` — see the ⚠️ note above.
 
 Sources: reflection against `mediabrowser.server.core` 4.9.1.90 (this session);
 Emby community "Get/Create Collections Plugin Service"; Jellyfin
