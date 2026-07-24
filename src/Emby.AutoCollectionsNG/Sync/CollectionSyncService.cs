@@ -408,15 +408,37 @@ namespace Emby.AutoCollectionsNG.Sync
 
                 try
                 {
-                    await _collectionManager.CreateCollection(new CollectionCreationOptions
+                    // The returned BoxSet is the only way to tell whether the host actually
+                    // persisted anything: CreateCollection can return without throwing while no
+                    // BoxSet ends up in the library, in which case reporting "created" would be a
+                    // phantom success that also breaks the next run's idempotency check.
+                    var created = await _collectionManager.CreateCollection(new CollectionCreationOptions
                     {
                         Name = collectionName,
                         ItemIdList = desiredIds.ToArray()
                     }).ConfigureAwait(false);
 
+                    if (created == null || created.InternalId == 0)
+                    {
+                        var detail = created == null
+                            ? "the host returned no BoxSet"
+                            : "the host returned a BoxSet with InternalId 0";
+                        result.Errors.Add($"Failed to create collection '{collectionName}': {detail}, so nothing was persisted.");
+                        _logger.Error(
+                            "Auto Collections NG: creating collection '{0}' did not persist anything - {1}. Requested {2} item(s).",
+                            collectionName,
+                            detail,
+                            desiredIds.Count);
+                        return;
+                    }
+
                     outcome.Created = true;
                     outcome.ItemsAdded = desiredIds.Count;
-                    _logger.Info("Auto Collections NG: created collection '{0}' with {1} item(s).", collectionName, desiredIds.Count);
+                    _logger.Info(
+                        "Auto Collections NG: created collection '{0}' (internalId {1}) with {2} item(s).",
+                        collectionName,
+                        created.InternalId,
+                        desiredIds.Count);
                 }
                 catch (Exception ex)
                 {
