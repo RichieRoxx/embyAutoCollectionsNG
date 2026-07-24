@@ -42,6 +42,11 @@ namespace Emby.AutoCollectionsNG.Sync
         // can never report members).
         private readonly Func<BaseItem, long[]> _collectionMemberIdsProvider;
 
+        // Runtime type name per matched item id, purely so failures can report WHICH kinds of items
+        // were involved. Emby refuses some item types as collection members, and the host gives no
+        // reason when it rejects a call, so this is the only way to see it from the log.
+        private readonly Dictionary<long, string> _matchedItemTypes = new Dictionary<long, string>();
+
         public CollectionSyncService(
             ILibraryManager libraryManager,
             ICollectionManager collectionManager,
@@ -93,6 +98,7 @@ namespace Emby.AutoCollectionsNG.Sync
         {
             var result = new SyncResult();
             _topAncestorNameCache.Clear();
+            _matchedItemTypes.Clear();
             // Re-resolve per run, so a collections folder created between runs is picked up.
             _collectionsFolder = null;
             _collectionsFolderResolved = false;
@@ -229,6 +235,24 @@ namespace Emby.AutoCollectionsNG.Sync
             return string.Join(", ", ids.Take(MaxIdsInErrorMessage)) + $", … (+{ids.Length - MaxIdsInErrorMessage} more)";
         }
 
+        /// <summary>
+        /// "Episode x40, Video x9" - a compact breakdown of the runtime types behind a set of item
+        /// ids, for log messages about rejected collection operations.
+        /// </summary>
+        private string DescribeItemTypes(IEnumerable<long> ids)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var id in ids ?? Enumerable.Empty<long>())
+            {
+                var name = _matchedItemTypes.TryGetValue(id, out var typeName) ? typeName : "<unknown>";
+                counts[name] = counts.TryGetValue(name, out var n) ? n + 1 : 1;
+            }
+
+            return counts.Count == 0
+                ? "<none>"
+                : string.Join(", ", counts.OrderByDescending(kv => kv.Value).Select(kv => kv.Key + " x" + kv.Value));
+        }
+
         private InternalItemsQuery BuildItemQuery(List<CollectionRule> validRules)
         {
             var query = new InternalItemsQuery
@@ -342,6 +366,7 @@ namespace Emby.AutoCollectionsNG.Sync
                 if (isMatch)
                 {
                     perRuleMatches[rule].Add(item.InternalId);
+                    _matchedItemTypes[item.InternalId] = itemTypeName;
                 }
             }
         }
@@ -545,18 +570,26 @@ namespace Emby.AutoCollectionsNG.Sync
 
                 try
                 {
-                    // The returned BoxSet is the only way to tell whether the host actually
-                    // persisted anything: CreateCollection can return without throwing while no
-                    // BoxSet ends up in the library, in which case reporting "created" would be a
-                    // phantom success that also breaks the next run's idempotency check.
-                    // ParentId is set up-front, not as a fallback: the reference Emby plugin that
-                    // reliably creates collections from a scheduled task always resolves the
-                    // 'boxsets' library folder first and passes its InternalId.
+                    _logger.Info(
+                        "Auto Collections NG: creating '{0}' for {1} item(s) of type(s): {2}.",
+                        collectionName,
+                        desiredIds.Count,
+                        DescribeItemTypes(desiredIds));
+
+                    // Created EMPTY on purpose, then populated through AddToCollection.
+                    //
+                    // Passing ItemIdList to CreateCollection makes the host return null and persist
+                    // nothing on this server - no exception, no server-side log line - while
+                    // AddToCollection against an existing collection works reliably. Splitting the
+                    // two isolates the part that fails from the part that is known good.
+                    //
+                    // ParentId is resolved up-front rather than left to the host, mirroring the
+                    // reference Emby plugin that reliably creates collections from a scheduled task.
                     var options = new CollectionCreationOptions
                     {
                         IsLocked = false,
                         Name = collectionName,
-                        ItemIdList = desiredIds.ToArray()
+                        ItemIdList = Array.Empty<long>()
                     };
 
                     var collectionsFolder = GetCollectionsFolder();
@@ -581,10 +614,12 @@ namespace Emby.AutoCollectionsNG.Sync
                         return;
                     }
 
+                    await _collectionManager.AddToCollection(created.InternalId, desiredIds.ToArray()).ConfigureAwait(false);
+
                     outcome.Created = true;
                     outcome.ItemsAdded = desiredIds.Count;
                     _logger.Info(
-                        "Auto Collections NG: created collection '{0}' (internalId {1}) with {2} item(s).",
+                        "Auto Collections NG: created collection '{0}' (internalId {1}) and added {2} item(s).",
                         collectionName,
                         created.InternalId,
                         desiredIds.Count);
@@ -649,6 +684,15 @@ namespace Emby.AutoCollectionsNG.Sync
 
             if (toAdd.Length > 0)
             {
+                // Logged every run on purpose: if the same items keep showing up here, the host is
+                // accepting the add but not persisting the membership for those types, which is the
+                // only visible symptom of that.
+                _logger.Info(
+                    "Auto Collections NG: collection '{0}' needs {1} item(s) added, type(s): {2}.",
+                    collectionName,
+                    toAdd.Length,
+                    DescribeItemTypes(toAdd));
+
                 try
                 {
                     await _collectionManager.AddToCollection(existing.InternalId, toAdd).ConfigureAwait(false);
