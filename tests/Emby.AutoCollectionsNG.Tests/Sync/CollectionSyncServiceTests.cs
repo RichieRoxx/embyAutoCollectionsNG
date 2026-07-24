@@ -106,15 +106,11 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
             var result = await sut.SyncAsync(config, null, CancellationToken.None);
 
-            // The collection is created empty and populated afterwards: passing ItemIdList to
-            // CreateCollection makes the live host return null and persist nothing, while
-            // AddToCollection works. See CollectionSyncService.ReconcileCollectionAsync.
+            // The host rejects a creation with an empty ItemIdList (it returns null), so the
+            // matched items are passed straight to CreateCollection.
             collectionManager.Verify(
                 m => m.CreateCollection(It.Is<CollectionCreationOptions>(o =>
-                    o.Name == "Formel 1" && o.ItemIdList.Length == 0)),
-                Times.Once);
-            collectionManager.Verify(
-                m => m.AddToCollection(9999, It.Is<long[]>(ids => ids.Length == 1 && ids[0] == 1)),
+                    o.Name == "Formel 1" && o.ItemIdList.Length == 1 && o.ItemIdList[0] == 1)),
                 Times.Once);
             Assert.Single(result.Collections);
             Assert.True(result.Collections[0].Created);
@@ -352,10 +348,7 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
 
             collectionManager.Verify(
                 m => m.CreateCollection(It.Is<CollectionCreationOptions>(o =>
-                    o.Name == "ZDF Satire" && o.ItemIdList.Length == 0)),
-                Times.Once);
-            collectionManager.Verify(
-                m => m.AddToCollection(9999, It.Is<long[]>(ids => ids.OrderBy(x => x).SequenceEqual(new long[] { 1, 2 }))),
+                    o.Name == "ZDF Satire" && o.ItemIdList.OrderBy(x => x).SequenceEqual(new long[] { 1, 2 }))),
                 Times.Once);
         }
 
@@ -379,10 +372,8 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             var result = await sut.SyncAsync(config, null, CancellationToken.None);
 
             collectionManager.Verify(
-                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o => o.ItemIdList.Length == 0)),
-                Times.Once);
-            collectionManager.Verify(
-                m => m.AddToCollection(9999, It.Is<long[]>(ids => ids.Length == 1 && ids[0] == 1)),
+                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o =>
+                    o.ItemIdList.Length == 1 && o.ItemIdList[0] == 1)),
                 Times.Once);
         }
 
@@ -641,10 +632,7 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             var result = await sut.SyncAsync(config, null, CancellationToken.None);
 
             collectionManager.Verify(
-                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o => o.Name == "Formel 1" && o.ItemIdList.Length == 0)),
-                Times.Once);
-            collectionManager.Verify(
-                m => m.AddToCollection(9999, It.Is<long[]>(ids => ids.Length == 1)),
+                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o => o.Name == "Formel 1" && o.ItemIdList.Length == 1)),
                 Times.Once);
             Assert.Single(result.Collections);
             Assert.True(result.Collections[0].Created);
@@ -777,7 +765,8 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             // Only the real recording counts as a match, and only it is ever added.
             Assert.Equal(1, result.RuleHitCounts["Formel 1"]);
             collectionManager.Verify(
-                m => m.AddToCollection(9999, It.Is<long[]>(ids => ids.Length == 1 && ids[0] == 1)),
+                m => m.CreateCollection(It.Is<CollectionCreationOptions>(o =>
+                    o.ItemIdList.Length == 1 && o.ItemIdList[0] == 1)),
                 Times.Once);
         }
 

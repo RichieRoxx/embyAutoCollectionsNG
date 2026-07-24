@@ -587,20 +587,17 @@ namespace Emby.AutoCollectionsNG.Sync
                         desiredIds.Count,
                         DescribeItemTypes(desiredIds));
 
-                    // Created EMPTY on purpose, then populated through AddToCollection.
-                    //
-                    // Passing ItemIdList to CreateCollection makes the host return null and persist
-                    // nothing on this server - no exception, no server-side log line - while
-                    // AddToCollection against an existing collection works reliably. Splitting the
-                    // two isolates the part that fails from the part that is known good.
-                    //
-                    // ParentId is resolved up-front rather than left to the host, mirroring the
-                    // reference Emby plugin that reliably creates collections from a scheduled task.
+                    // The host wants a non-empty, valid ItemIdList: creating with an empty list
+                    // returns null just like creating with items it rejects (Live TV guide entries)
+                    // did. Only genuinely eligible items reach this point now, so they are passed
+                    // straight to CreateCollection - which is also what the reference Emby plugin
+                    // does. ParentId is resolved up-front rather than left to the host, same as
+                    // that reference.
                     var options = new CollectionCreationOptions
                     {
                         IsLocked = false,
                         Name = collectionName,
-                        ItemIdList = Array.Empty<long>()
+                        ItemIdList = desiredIds.ToArray()
                     };
 
                     var collectionsFolder = GetCollectionsFolder();
@@ -625,12 +622,10 @@ namespace Emby.AutoCollectionsNG.Sync
                         return;
                     }
 
-                    await _collectionManager.AddToCollection(created.InternalId, desiredIds.ToArray()).ConfigureAwait(false);
-
                     outcome.Created = true;
                     outcome.ItemsAdded = desiredIds.Count;
                     _logger.Info(
-                        "Auto Collections NG: created collection '{0}' (internalId {1}) and added {2} item(s).",
+                        "Auto Collections NG: created collection '{0}' (internalId {1}) with {2} item(s).",
                         collectionName,
                         created.InternalId,
                         desiredIds.Count);
