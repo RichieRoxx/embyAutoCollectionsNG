@@ -37,12 +37,9 @@ namespace Emby.AutoCollectionsNG.Sync
         // shares a library.
         private readonly Dictionary<long, string> _topAncestorNameCache = new Dictionary<long, string>();
 
-        // Seam for reading a collection's current member IDs. Folder.GetChildren(...) is not virtual
-        // and, on a Folder/BoxSet instance that isn't attached to a live Emby host (as in unit tests),
-        // always returns zero children regardless of what it conceptually should contain - there's no
-        // way to make a bare instance behave otherwise. Routing this through an injectable delegate
-        // keeps production code using the real, confirmed Folder.GetChildren API while letting tests
-        // substitute canned membership for a given collection instance.
+        // Seam for reading a collection's current member IDs, so tests can substitute canned
+        // membership for a given collection instance (a bare BoxSet has no live host behind it and
+        // can never report members).
         private readonly Func<BaseItem, long[]> _collectionMemberIdsProvider;
 
         public CollectionSyncService(
@@ -56,18 +53,36 @@ namespace Emby.AutoCollectionsNG.Sync
             _collectionManager = collectionManager ?? throw new ArgumentNullException(nameof(collectionManager));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _ruleMatcher = ruleMatcher ?? new RuleMatcher();
-            _collectionMemberIdsProvider = collectionMemberIdsProvider ?? GetCollectionMemberIdsViaFolder;
+            _collectionMemberIdsProvider = collectionMemberIdsProvider ?? GetCollectionMemberIds;
         }
 
-        private static long[] GetCollectionMemberIdsViaFolder(BaseItem collection)
+        /// <summary>
+        /// Reads a collection's current members by querying the library for its children, rather
+        /// than calling <c>Folder.GetChildren</c> on the fetched BoxSet.
+        ///
+        /// <c>Folder.GetChildren</c> returns nothing here even for a real, fully-identified BoxSet
+        /// loaded from the library (observed on a live Emby 4.9.5 server: a collection with 90
+        /// persisted members reported zero children). Because the reconciliation diffs desired
+        /// against current membership, that made every run re-add every member - the sync logged
+        /// "+107 / -0" on a collection that already contained those items, breaking the idempotency
+        /// requirement. Querying by <see cref="InternalItemsQuery.ParentIds"/> is how Emby's own
+        /// clients list a collection's contents.
+        /// </summary>
+        private long[] GetCollectionMemberIds(BaseItem collection)
         {
-            if (!(collection is Folder folder))
+            if (collection == null || collection.InternalId == 0)
             {
                 return Array.Empty<long>();
             }
 
-            var children = folder.GetChildren(new InternalItemsQuery { DtoOptions = new DtoOptions(false) });
-            return (children ?? Array.Empty<BaseItem>()).Select(c => c.InternalId).ToArray();
+            var members = _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                ParentIds = new[] { collection.InternalId },
+                // All fields, or the returned members come back with InternalId 0 - see BuildItemQuery.
+                DtoOptions = new DtoOptions(true)
+            });
+
+            return (members ?? Array.Empty<BaseItem>()).Select(c => c.InternalId).ToArray();
         }
 
         public async Task<SyncResult> SyncAsync(PluginConfiguration config, IProgress<double> progress, CancellationToken cancellationToken)
@@ -388,6 +403,110 @@ namespace Emby.AutoCollectionsNG.Sync
             return byName;
         }
 
+        /// <summary>
+        /// Second attempt at creating a collection, with <see cref="CollectionCreationOptions.ParentId"/>
+        /// pointed explicitly at the library's collections folder.
+        ///
+        /// Background (live Emby 4.9.5): calling <c>CreateCollection</c> with only Name+ItemIdList
+        /// returns <c>null</c> and persists nothing - no exception, no server-side log entry. The
+        /// host resolves the parent collections folder itself in that case, and a null result is
+        /// consistent with that internal lookup coming up empty when nothing tells it which folder
+        /// to use.
+        ///
+        /// The folder is identified by <c>CollectionType == "boxsets"</c> rather than by its
+        /// display name, which is user-visible and localizable. <c>CollectionType</c> is read
+        /// reflectively on purpose: it is not part of the API surface confirmed in
+        /// docs/emby-api-cheatsheet.md, so this reads it defensively and falls back to matching the
+        /// folder name instead of assuming a compile-time member that may not exist.
+        /// </summary>
+        private async Task<BoxSet> TryCreateInCollectionsFolderAsync(
+            string collectionName,
+            HashSet<long> desiredIds,
+            SyncResult result)
+        {
+            BaseItem[] folders;
+            try
+            {
+                folders = _libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    IncludeItemTypes = new[] { "CollectionFolder" },
+                    Recursive = true,
+                    DtoOptions = new DtoOptions(true)
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException("Auto Collections NG: could not look up the collections folder", ex);
+                return null;
+            }
+
+            BaseItem target = null;
+            foreach (var folder in folders ?? Array.Empty<BaseItem>())
+            {
+                var collectionType = ReadCollectionType(folder);
+                _logger.Info(
+                    "Auto Collections NG: candidate library folder '{0}' (internalId {1}, collectionType '{2}').",
+                    folder.Name,
+                    folder.InternalId,
+                    collectionType ?? "<none>");
+
+                if (string.Equals(collectionType, "boxsets", StringComparison.OrdinalIgnoreCase)
+                    || (target == null && string.Equals(folder.Name, "Collections", StringComparison.OrdinalIgnoreCase)))
+                {
+                    target = folder;
+                }
+            }
+
+            if (target == null || target.InternalId == 0)
+            {
+                _logger.Error("Auto Collections NG: no usable collections folder found, cannot create '{0}'.", collectionName);
+                return null;
+            }
+
+            try
+            {
+                var created = await _collectionManager.CreateCollection(new CollectionCreationOptions
+                {
+                    Name = collectionName,
+                    ItemIdList = desiredIds.ToArray(),
+                    ParentId = target.InternalId
+                }).ConfigureAwait(false);
+
+                _logger.Info(
+                    "Auto Collections NG: retried creating '{0}' under folder '{1}' (internalId {2}) -> {3}.",
+                    collectionName,
+                    target.Name,
+                    target.InternalId,
+                    created == null ? "still null" : "internalId " + created.InternalId);
+
+                return created;
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"Retrying creation of collection '{collectionName}' under the collections folder failed: {ex.Message}");
+                _logger.ErrorException("Auto Collections NG: retrying creation of '{0}' failed", ex, collectionName);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Reads a library folder's <c>CollectionType</c> reflectively, returning null when the
+        /// property doesn't exist or can't be read. See <see cref="TryCreateInCollectionsFolderAsync"/>
+        /// for why this isn't a direct member access.
+        /// </summary>
+        private static string ReadCollectionType(BaseItem folder)
+        {
+            try
+            {
+                var property = folder.GetType().GetProperty("CollectionType");
+                return property?.GetValue(folder) as string;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
         private async Task ReconcileCollectionAsync(
             string collectionName,
             HashSet<long> desiredIds,
@@ -417,6 +536,16 @@ namespace Emby.AutoCollectionsNG.Sync
                         Name = collectionName,
                         ItemIdList = desiredIds.ToArray()
                     }).ConfigureAwait(false);
+
+                    if (created == null || created.InternalId == 0)
+                    {
+                        // The host bailed out internally without throwing. Its collection manager
+                        // resolves a parent "collections" library folder itself when the options
+                        // don't name one, and returning null is what that lookup failing looks
+                        // like from out here - so retry once, explicitly pointing ParentId at the
+                        // library's collections folder.
+                        created = await TryCreateInCollectionsFolderAsync(collectionName, desiredIds, result).ConfigureAwait(false);
+                    }
 
                     if (created == null || created.InternalId == 0)
                     {
