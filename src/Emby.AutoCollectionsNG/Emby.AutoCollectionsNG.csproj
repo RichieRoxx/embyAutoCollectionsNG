@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <AssemblyName>Emby.AutoCollectionsNG</AssemblyName>
+    <RootNamespace>Emby.AutoCollectionsNG</RootNamespace>
+    <LangVersion>8.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Version>0.1.0</Version>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MediaBrowser.Server.Core" Version="4.9.1.90" />
+    <!-- Required to resolve MediaBrowser.Model.Logging.ILogger's ReadOnlyMemory<char> overloads,
+         which aren't part of the netstandard2.0 base class library. -->
+    <PackageReference Include="System.Memory" Version="4.6.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Lets the test project use the internal test-seam constructor on
+         AutoCollectionsSyncTask (accepts a pre-built CollectionSyncService + fake config
+         provider) without making that constructor part of the plugin's public API surface. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Emby.AutoCollectionsNG.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Plugin configuration page (issue #9), served via IHasWebPages/PluginPageInfo. The
+         manifest resource name the host must be given in PluginPageInfo.EmbeddedResourcePath is
+         the default .NET convention: RootNamespace + folder path + file name, each separator
+         replaced with '.' -> "Emby.AutoCollectionsNG.Configuration.configPage.html" (verified by
+         ConfigPageEmbeddedResourceTests, which loads the built assembly and asserts the resource
+         is present under that exact name). -->
+    <EmbeddedResource Include="Configuration\configPage.html" />
+    <!-- Controller module referenced by configPage.html via data-controller. Served through the
+         same ConfigurationPage-by-name route, so it must be embedded and registered in
+         Plugin.GetPages() (Name "autocollectionsngjs"). Resource name follows the same default
+         convention -> "Emby.AutoCollectionsNG.Configuration.configPage.js". -->
+    <EmbeddedResource Include="Configuration\configPage.js" />
+  </ItemGroup>
+
+</Project>

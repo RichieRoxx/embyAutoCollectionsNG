@@ -34,10 +34,14 @@ own: mass events during a library scan, possibly incomplete metadata on
 
 1. Whether Emby collections (BoxSets) accept recordings/`.ts` videos and
    display them correctly in the UI — collections are primarily designed for
-   movies. Fallback: playlists (`IPlaylistManager`) or tag-based filters.
+   movies. **Resolved as far as possible without a live server:** static API
+   evidence (reflection) shows no restriction, so `BoxSet` is the primary
+   target; live UI rendering is still unverified. See
+   [`docs/api-notes.md`](api-notes.md). Fallback: playlists
+   (`IPlaylistManager`).
 2. Whether the declarative plugin UI (auto-generated from the config model)
    supports list editing and action buttons — fallback: classic embedded HTML
-   configuration page.
+   configuration page. Still open, addressed in #9.
 
 ## Work packages (order = processing sequence)
 
@@ -55,6 +59,21 @@ own: mass events during a library scan, possibly incomplete metadata on
 | 10 | #11 Packaging, docs & release | docs | all |
 
 **MVP = issues #2–#7** (rules via config, periodic + manual sync).
+
+## Hardening / robustness verification (issue #10)
+
+Issue #10 is a verification pass over the sync engine (#6) and scheduled task
+(#7), which were already built with idempotency, defensive error handling,
+and safe regex execution as hard requirements from the start (see
+`CLAUDE.md`). #10 added targeted tests proving those guarantees hold
+(invalid-regex isolation regardless of rule order, null-`Path` items with
+`AlsoMatchFileName`, one collection's failure not blocking others in the same
+run, cancellation leaving no partial collection writes) plus a large-in-memory
+(12k item) regression guard against accidental quadratic behavior. It also
+improved a few error messages to include the affected item IDs. See
+[`docs/performance-notes.md`](performance-notes.md) for the honest scope of
+the large-library simulation (what it validates vs. what still needs a live
+server).
 
 ## References
 

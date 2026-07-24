@@ -1,0 +1,754 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Emby.AutoCollectionsNG.Configuration;
+using Emby.AutoCollectionsNG.Matching;
+using MediaBrowser.Controller.Collections;
+using MediaBrowser.Controller.Dto;
+using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Logging;
+
+namespace Emby.AutoCollectionsNG.Sync
+{
+    /// <summary>
+    /// Reconciles Emby collections (BoxSets) against the configured <see cref="CollectionRule"/>s.
+    /// Idempotent: running twice with no data/config change makes zero writes.
+    ///
+    /// Sync target decision (issue #3, see docs/api-notes.md): BoxSets, via
+    /// <see cref="ICollectionManager"/>. Only collections whose name matches a rule's
+    /// <see cref="CollectionRule.CollectionName"/> are ever touched — any other collection in the
+    /// library is left alone, so this plugin only owns what it configured.
+    /// </summary>
+    public class CollectionSyncService
+    {
+        // Fetch items in pages rather than one giant array, so memory stays bounded on large libraries.
+        private const int PageSize = 500;
+
+        private readonly ILibraryManager _libraryManager;
+        private readonly ICollectionManager _collectionManager;
+        private readonly ILogger _logger;
+        private readonly RuleMatcher _ruleMatcher;
+
+        // Memoizes "top-level ancestor name" per folder InternalId, since walking BaseItem.Parent to
+        // the root for every single item would otherwise repeat the same walk for every item that
+        // shares a library.
+        private readonly Dictionary<long, string> _topAncestorNameCache = new Dictionary<long, string>();
+
+        // Seam for reading a collection's current member IDs, so tests can substitute canned
+        // membership for a given collection instance (a bare BoxSet has no live host behind it and
+        // can never report members).
+        private readonly Func<BaseItem, long[]> _collectionMemberIdsProvider;
+
+        // Runtime type name per matched item id, purely so failures can report WHICH kinds of items
+        // were involved. Emby refuses some item types as collection members, and the host gives no
+        // reason when it rejects a call, so this is the only way to see it from the log.
+        private readonly Dictionary<long, string> _matchedItemTypes = new Dictionary<long, string>();
+
+        public CollectionSyncService(
+            ILibraryManager libraryManager,
+            ICollectionManager collectionManager,
+            ILogger logger,
+            RuleMatcher ruleMatcher = null,
+            Func<BaseItem, long[]> collectionMemberIdsProvider = null)
+        {
+            _libraryManager = libraryManager ?? throw new ArgumentNullException(nameof(libraryManager));
+            _collectionManager = collectionManager ?? throw new ArgumentNullException(nameof(collectionManager));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _ruleMatcher = ruleMatcher ?? new RuleMatcher();
+            _collectionMemberIdsProvider = collectionMemberIdsProvider ?? GetCollectionMemberIds;
+        }
+
+        /// <summary>
+        /// Reads a collection's current members by querying the library for its children, rather
+        /// than calling <c>Folder.GetChildren</c> on the fetched BoxSet.
+        ///
+        /// <c>Folder.GetChildren</c> returns nothing here even for a real, fully-identified BoxSet
+        /// loaded from the library (observed on a live Emby 4.9.5 server: a collection with 90
+        /// persisted members reported zero children). Because the reconciliation diffs desired
+        /// against current membership, that made every run re-add every member - the sync logged
+        /// "+107 / -0" on a collection that already contained those items, breaking the idempotency
+        /// requirement. <see cref="InternalItemsQuery.ParentIds"/> does not work either - a BoxSet's
+        /// members are linked children - so the collection is addressed via <c>CollectionIds</c>.
+        /// </summary>
+        private long[] GetCollectionMemberIds(BaseItem collection)
+        {
+            if (collection == null || collection.InternalId == 0)
+            {
+                return Array.Empty<long>();
+            }
+
+            var members = _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                // CollectionIds, not ParentIds: a BoxSet's members are linked children rather than
+                // filesystem-style children, and ParentIds returns nothing for a collection that
+                // demonstrably holds members. Emby switched collection membership queries from
+                // ListIds to CollectionIds in 4.6 (Emby developer forum, topic 90515).
+                CollectionIds = new[] { collection.InternalId },
+                // All fields, or the returned members come back with InternalId 0 - see BuildItemQuery.
+                DtoOptions = new DtoOptions(true)
+            });
+
+            return (members ?? Array.Empty<BaseItem>()).Select(c => c.InternalId).ToArray();
+        }
+
+        public async Task<SyncResult> SyncAsync(PluginConfiguration config, IProgress<double> progress, CancellationToken cancellationToken)
+        {
+            var result = new SyncResult();
+            _topAncestorNameCache.Clear();
+            _matchedItemTypes.Clear();
+            // Re-resolve per run, so a collections folder created between runs is picked up.
+            _collectionsFolder = null;
+            _collectionsFolderResolved = false;
+
+            var rules = config?.Rules ?? Array.Empty<CollectionRule>();
+            var enabledRules = rules.Where(r => r != null && r.Enabled).ToArray();
+
+            var validRules = new List<CollectionRule>();
+            foreach (var rule in enabledRules)
+            {
+                if (string.IsNullOrWhiteSpace(rule.CollectionName))
+                {
+                    _logger.Error("Auto Collections NG: skipping a rule with no CollectionName set.");
+                    continue;
+                }
+
+                if (!_ruleMatcher.TryCompile(rule, out var error))
+                {
+                    _logger.Error("Auto Collections NG: rule '{0}' has an invalid pattern and will be skipped: {1}", rule.CollectionName, error);
+                    result.RuleErrors[rule.CollectionName] = error;
+                    continue;
+                }
+
+                validRules.Add(rule);
+            }
+
+            if (validRules.Count == 0)
+            {
+                _logger.Info("Auto Collections NG: no valid enabled rules, nothing to sync.");
+                return result;
+            }
+
+            // Per-rule matched item IDs, then unioned by target collection name below - multiple
+            // rules may target the same collection.
+            var perRuleMatches = validRules.ToDictionary(r => r, _ => new HashSet<long>());
+
+            var query = BuildItemQuery(validRules);
+            var startIndex = 0;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                query.StartIndex = startIndex;
+                query.Limit = PageSize;
+
+                BaseItem[] page;
+                try
+                {
+                    page = _libraryManager.GetItemList(query);
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Failed to query items at offset {startIndex}: {ex.Message}");
+                    _logger.ErrorException("Auto Collections NG: failed to query items at offset {0}", ex, startIndex);
+                    break;
+                }
+
+                if (page == null || page.Length == 0)
+                {
+                    break;
+                }
+
+                foreach (var item in page)
+                {
+                    ProcessItem(item, validRules, perRuleMatches, result);
+                }
+
+                result.ItemsScanned += page.Length;
+                progress?.Report(Math.Min(99, startIndex));
+
+                if (page.Length < PageSize)
+                {
+                    break;
+                }
+
+                startIndex += PageSize;
+            }
+
+            foreach (var rule in validRules)
+            {
+                result.RuleHitCounts[rule.CollectionName] = result.RuleHitCounts.TryGetValue(rule.CollectionName, out var existing)
+                    ? existing + perRuleMatches[rule].Count
+                    : perRuleMatches[rule].Count;
+            }
+
+            var desiredByCollectionName = new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
+            foreach (var rule in validRules)
+            {
+                if (!desiredByCollectionName.TryGetValue(rule.CollectionName, out var set))
+                {
+                    set = new HashSet<long>();
+                    desiredByCollectionName[rule.CollectionName] = set;
+                }
+
+                set.UnionWith(perRuleMatches[rule]);
+            }
+
+            var existingCollectionsByName = LoadExistingCollections(cancellationToken, result);
+
+            var targetCollectionNames = validRules.Select(r => r.CollectionName).Distinct(StringComparer.Ordinal);
+            foreach (var collectionName in targetCollectionNames)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var desiredIds = desiredByCollectionName.TryGetValue(collectionName, out var ids) ? ids : new HashSet<long>();
+                existingCollectionsByName.TryGetValue(collectionName, out var existing);
+
+                await ReconcileCollectionAsync(collectionName, desiredIds, existing, config?.DeleteEmptyCollections ?? false, result)
+                    .ConfigureAwait(false);
+            }
+
+            progress?.Report(100);
+            return result;
+        }
+
+        // Caps how many internal IDs get spelled out in an error message, so a failure on a
+        // collection with thousands of pending adds/removes doesn't produce an unreadable log line -
+        // the count is already logged separately, this just adds "which ones" context for the common
+        // case of a handful of items.
+        private const int MaxIdsInErrorMessage = 20;
+
+        private static string FormatIds(long[] ids)
+        {
+            if (ids == null || ids.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            if (ids.Length <= MaxIdsInErrorMessage)
+            {
+                return string.Join(", ", ids);
+            }
+
+            return string.Join(", ", ids.Take(MaxIdsInErrorMessage)) + $", … (+{ids.Length - MaxIdsInErrorMessage} more)";
+        }
+
+        /// <summary>
+        /// "Episode x40, Video x9" - a compact breakdown of the runtime types behind a set of item
+        /// ids, for log messages about rejected collection operations.
+        /// </summary>
+        private string DescribeItemTypes(IEnumerable<long> ids)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var id in ids ?? Enumerable.Empty<long>())
+            {
+                var name = _matchedItemTypes.TryGetValue(id, out var typeName) ? typeName : "<unknown>";
+                counts[name] = counts.TryGetValue(name, out var n) ? n + 1 : 1;
+            }
+
+            return counts.Count == 0
+                ? "<none>"
+                : string.Join(", ", counts.OrderByDescending(kv => kv.Value).Select(kv => kv.Key + " x" + kv.Value));
+        }
+
+        private InternalItemsQuery BuildItemQuery(List<CollectionRule> validRules)
+        {
+            var query = new InternalItemsQuery
+            {
+                Recursive = true,
+                // MUST be all-fields. With `new DtoOptions(false)` the Emby item repository does
+                // not materialize the identity columns: every returned BaseItem came back with
+                // InternalId == 0 and Id == Guid.Empty (verified on a live Emby 4.9.5 server, and
+                // confirmed via reflection - it is not an assembly mismatch). That silently broke
+                // the entire sync, since ICollectionManager addressses items by InternalId: all
+                // matched IDs collapsed to the single value 0 in the per-rule HashSet, so every
+                // rule reported "1 item", CreateCollection received ItemIdList=[0] and persisted
+                // no BoxSet at all, and AddToCollection threw "No collection exists with the
+                // supplied Id". Do not "optimize" this back to minimal fields without re-verifying
+                // that InternalId survives. See docs/emby-api-cheatsheet.md, "Querying items".
+                DtoOptions = new DtoOptions(true)
+            };
+
+            // If every rule restricts item types, push the union down into the query as a perf
+            // optimization. If any rule wants "all types" (empty filter), we can't restrict globally
+            // without missing items for that rule, so leave IncludeItemTypes unset in that case.
+            var allRulesRestrictTypes = validRules.All(r => r.ItemTypeFilter != null && r.ItemTypeFilter.Length > 0);
+            if (allRulesRestrictTypes)
+            {
+                query.IncludeItemTypes = validRules
+                    .SelectMany(r => r.ItemTypeFilter)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+
+            return query;
+        }
+
+        // Item types that must never end up in a collection, matched by runtime type name so this
+        // stays compilable regardless of which of them the SDK exposes publicly in a given version.
+        //
+        // Two groups:
+        //   - Library structure (root, "Media Folders", the per-library folders, existing
+        //     collections). An unfiltered item query returns these.
+        //   - Live TV guide data. `LiveTvProgram` entries are EPG listings, not library content -
+        //     on a DVR setup they vastly outnumber the actual recordings (3409 vs 188 here). Emby
+        //     silently refuses them as collection members: AddToCollection accepts the call but
+        //     never persists the membership (the same 15 items were re-added on every single run),
+        //     and CreateCollection returns null outright when every candidate is one of these, so
+        //     the collection was never created at all.
+        private static readonly HashSet<string> NonMemberItemTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            // Library structure
+            "AggregateFolder",
+            "UserRootFolder",
+            "CollectionFolder",
+            "UserView",
+            "Folder",
+            "BoxSet",
+            // Live TV guide data, not library items
+            "LiveTvProgram",
+            "LiveTvChannel",
+            "TvChannel",
+            "Program"
+        };
+
+        private void ProcessItem(
+            BaseItem item,
+            List<CollectionRule> validRules,
+            Dictionary<CollectionRule, HashSet<long>> perRuleMatches,
+            SyncResult result)
+        {
+            if (NonMemberItemTypes.Contains(item.GetType().Name))
+            {
+                return;
+            }
+
+            var rawTitle = item.Name;
+            if (string.IsNullOrWhiteSpace(rawTitle))
+            {
+                result.ItemsSkippedNoTitle++;
+                return;
+            }
+
+            string normalizedTitle;
+            try
+            {
+                normalizedTitle = TitleNormalizer.Normalize(rawTitle);
+            }
+            catch (Exception ex)
+            {
+                // Defensive: normalization must never abort a whole run over one odd title.
+                _logger.ErrorException("Auto Collections NG: failed to normalize title '{0}'", ex, rawTitle);
+                normalizedTitle = rawTitle;
+            }
+
+            var fileNameOrPath = item.Path;
+            var itemTypeName = item.GetType().Name;
+            var libraryName = GetTopAncestorName(item);
+
+            foreach (var rule in validRules)
+            {
+                if (rule.LibraryFilter != null && rule.LibraryFilter.Length > 0
+                    && !rule.LibraryFilter.Any(f => string.Equals(f, libraryName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                if (rule.ItemTypeFilter != null && rule.ItemTypeFilter.Length > 0
+                    && !rule.ItemTypeFilter.Any(f => string.Equals(f, itemTypeName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                bool isMatch;
+                try
+                {
+                    isMatch = _ruleMatcher.IsMatch(rule, rawTitle, normalizedTitle, fileNameOrPath);
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Rule '{rule.CollectionName}' failed while matching item '{rawTitle}': {ex.Message}");
+                    _logger.ErrorException("Auto Collections NG: rule '{0}' failed while matching item '{1}'", ex, rule.CollectionName, rawTitle);
+                    continue;
+                }
+
+                if (isMatch)
+                {
+                    perRuleMatches[rule].Add(item.InternalId);
+                    _matchedItemTypes[item.InternalId] = itemTypeName;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Walks up <see cref="BaseItem.Parent"/> to the topmost ancestor and returns its name, used
+        /// as a best-effort stand-in for "which library this item belongs to" so
+        /// <see cref="CollectionRule.LibraryFilter"/> has something concrete to compare against
+        /// without an extra library-resolution API call. This is an MVP design choice, not a
+        /// guaranteed match to Emby's internal library-scoping in every possible folder setup -
+        /// revisit if it doesn't hold up for a given library topology (see docs/PLAN.md #10).
+        /// </summary>
+        private string GetTopAncestorName(BaseItem item)
+        {
+            var current = item.Parent;
+            if (current == null)
+            {
+                return null;
+            }
+
+            if (_topAncestorNameCache.TryGetValue(current.InternalId, out var cached))
+            {
+                return cached;
+            }
+
+            var walked = new List<long>();
+            Folder top = current;
+            while (top.Parent != null)
+            {
+                walked.Add(top.InternalId);
+                top = top.Parent;
+            }
+
+            var name = top.Name;
+            foreach (var id in walked)
+            {
+                _topAncestorNameCache[id] = name;
+            }
+
+            _topAncestorNameCache[top.InternalId] = name;
+            return name;
+        }
+
+        private Dictionary<string, BaseItem> LoadExistingCollections(CancellationToken cancellationToken, SyncResult result)
+        {
+            var byName = new Dictionary<string, BaseItem>(StringComparer.Ordinal);
+
+            BaseItem[] collections;
+            try
+            {
+                collections = _libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    IncludeItemTypes = new[] { "BoxSet" },
+                    Recursive = true,
+                    // All-fields for the same reason as BuildItemQuery: with minimal fields the
+                    // returned BoxSet also carries InternalId == 0, so the collection could never
+                    // be matched to an existing one (every run re-"created" it) and
+                    // AddToCollection(existing.InternalId, ...) threw "No collection exists with
+                    // the supplied Id".
+                    DtoOptions = new DtoOptions(true)
+                });
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"Failed to query existing collections: {ex.Message}");
+                _logger.ErrorException("Auto Collections NG: failed to query existing collections", ex);
+                return byName;
+            }
+
+            foreach (var collection in collections ?? Array.Empty<BaseItem>())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (string.IsNullOrEmpty(collection.Name))
+                {
+                    continue;
+                }
+
+                if (byName.ContainsKey(collection.Name))
+                {
+                    _logger.Warn("Auto Collections NG: found more than one collection named '{0}'; using the first one found and ignoring the rest.", collection.Name);
+                    continue;
+                }
+
+                byName[collection.Name] = collection;
+            }
+
+            return byName;
+        }
+
+        // Resolved once per sync: the library's "collections" folder, which new BoxSets are
+        // created under. Null means "not found"; _collectionsFolderResolved distinguishes that
+        // from "not looked up yet" so a miss isn't re-queried for every rule.
+        private BaseItem _collectionsFolder;
+        private bool _collectionsFolderResolved;
+
+        /// <summary>
+        /// Finds the library's collections folder, identified by <c>CollectionType == "boxsets"</c>
+        /// rather than by its display name (which is user-visible and localizable).
+        ///
+        /// New collections are created with <see cref="CollectionCreationOptions.ParentId"/> set to
+        /// this folder, mirroring the reference Emby plugin that reliably creates collections from
+        /// a scheduled task. <c>CollectionType</c> is read reflectively because it is not part of
+        /// the API surface confirmed in docs/emby-api-cheatsheet.md; the folder name is used as a
+        /// fallback so a missing property degrades rather than breaks.
+        /// </summary>
+        private BaseItem GetCollectionsFolder()
+        {
+            if (_collectionsFolderResolved)
+            {
+                return _collectionsFolder;
+            }
+
+            _collectionsFolderResolved = true;
+
+            BaseItem[] folders;
+            try
+            {
+                folders = _libraryManager.GetItemList(new InternalItemsQuery
+                {
+                    IncludeItemTypes = new[] { "CollectionFolder" },
+                    Recursive = true,
+                    IsFolder = true,
+                    DtoOptions = new DtoOptions(true)
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException("Auto Collections NG: could not look up the collections folder", ex);
+                return null;
+            }
+
+            BaseItem byName = null;
+            foreach (var folder in folders ?? Array.Empty<BaseItem>())
+            {
+                if (folder == null || folder.InternalId == 0)
+                {
+                    continue;
+                }
+
+                if (string.Equals(ReadCollectionType(folder), "boxsets", StringComparison.OrdinalIgnoreCase))
+                {
+                    _collectionsFolder = folder;
+                    _logger.Debug(
+                        "Auto Collections NG: using collections folder '{0}' (internalId {1}).",
+                        folder.Name,
+                        folder.InternalId);
+                    return _collectionsFolder;
+                }
+
+                if (byName == null && string.Equals(folder.Name, "Collections", StringComparison.OrdinalIgnoreCase))
+                {
+                    byName = folder;
+                }
+            }
+
+            _collectionsFolder = byName;
+            if (_collectionsFolder == null)
+            {
+                _logger.Warn("Auto Collections NG: no collections folder found; new collections will be created without an explicit parent.");
+            }
+
+            return _collectionsFolder;
+        }
+
+        /// <summary>
+        /// Reads a library folder's <c>CollectionType</c> reflectively, returning null when the
+        /// property doesn't exist or can't be read. See <see cref="GetCollectionsFolder"/> for why
+        /// this isn't a direct member access.
+        /// </summary>
+        private static string ReadCollectionType(BaseItem folder)
+        {
+            try
+            {
+                var property = folder.GetType().GetProperty("CollectionType");
+                return property?.GetValue(folder) as string;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private async Task ReconcileCollectionAsync(
+            string collectionName,
+            HashSet<long> desiredIds,
+            BaseItem existing,
+            bool deleteEmptyCollections,
+            SyncResult result)
+        {
+            var outcome = new CollectionSyncOutcome(collectionName);
+
+            if (existing == null)
+            {
+                if (desiredIds.Count == 0)
+                {
+                    // Nothing matches and no collection exists yet - requirement #5: a collection is
+                    // only created once at least one item matches.
+                    return;
+                }
+
+                try
+                {
+                    _logger.Debug(
+                        "Auto Collections NG: creating '{0}' for {1} item(s) of type(s): {2}.",
+                        collectionName,
+                        desiredIds.Count,
+                        DescribeItemTypes(desiredIds));
+
+                    // The host wants a non-empty, valid ItemIdList: creating with an empty list
+                    // returns null just like creating with items it rejects (Live TV guide entries)
+                    // did. Only genuinely eligible items reach this point now, so they are passed
+                    // straight to CreateCollection - which is also what the reference Emby plugin
+                    // does. ParentId is resolved up-front rather than left to the host, same as
+                    // that reference.
+                    var options = new CollectionCreationOptions
+                    {
+                        IsLocked = false,
+                        Name = collectionName,
+                        ItemIdList = desiredIds.ToArray()
+                    };
+
+                    var collectionsFolder = GetCollectionsFolder();
+                    if (collectionsFolder != null)
+                    {
+                        options.ParentId = collectionsFolder.InternalId;
+                    }
+
+                    var created = await _collectionManager.CreateCollection(options).ConfigureAwait(false);
+
+                    if (created == null || created.InternalId == 0)
+                    {
+                        var detail = created == null
+                            ? "the host returned no BoxSet"
+                            : "the host returned a BoxSet with InternalId 0";
+                        // The host gives no reason, so the item types go into the error itself:
+                        // it refuses some of them (Live TV guide entries) without saying so.
+                        var types = DescribeItemTypes(desiredIds);
+                        result.Errors.Add($"Failed to create collection '{collectionName}': {detail}, so nothing was persisted. Requested {desiredIds.Count} item(s) of type(s): {types}.");
+                        _logger.Error(
+                            "Auto Collections NG: creating collection '{0}' did not persist anything - {1}. Requested {2} item(s) of type(s): {3}.",
+                            collectionName,
+                            detail,
+                            desiredIds.Count,
+                            types);
+                        return;
+                    }
+
+                    outcome.Created = true;
+                    outcome.ItemsAdded = desiredIds.Count;
+                    _logger.Info(
+                        "Auto Collections NG: created collection '{0}' (internalId {1}) with {2} item(s).",
+                        collectionName,
+                        created.InternalId,
+                        desiredIds.Count);
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Failed to create collection '{collectionName}': {ex.Message}");
+                    _logger.ErrorException("Auto Collections NG: failed to create collection '{0}'", ex, collectionName);
+                    return;
+                }
+
+                result.Collections.Add(outcome);
+                return;
+            }
+
+            if (desiredIds.Count == 0 && deleteEmptyCollections)
+            {
+                try
+                {
+                    _libraryManager.DeleteItem(existing, new DeleteOptions { DeleteFileLocation = false });
+                    outcome.Deleted = true;
+                    _logger.Info("Auto Collections NG: deleted empty collection '{0}'.", collectionName);
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Failed to delete empty collection '{collectionName}': {ex.Message}");
+                    _logger.ErrorException("Auto Collections NG: failed to delete empty collection '{0}'", ex, collectionName);
+                    return;
+                }
+
+                result.Collections.Add(outcome);
+                return;
+            }
+
+            if (!(existing is Folder))
+            {
+                result.Errors.Add($"Collection '{collectionName}' was found but is not a Folder-derived item (actual type: {existing.GetType().Name}); skipping.");
+                _logger.Error("Auto Collections NG: collection '{0}' was found but is not a Folder-derived item (actual type: {1}); skipping.", collectionName, existing.GetType().Name);
+                return;
+            }
+
+            HashSet<long> currentIds;
+            try
+            {
+                currentIds = new HashSet<long>(_collectionMemberIdsProvider(existing) ?? Array.Empty<long>());
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"Failed to read current members of collection '{collectionName}': {ex.Message}");
+                _logger.ErrorException("Auto Collections NG: failed to read current members of collection '{0}'", ex, collectionName);
+                return;
+            }
+
+            var toAdd = desiredIds.Where(id => !currentIds.Contains(id)).ToArray();
+            var toRemove = currentIds.Where(id => !desiredIds.Contains(id)).ToArray();
+
+            if (toAdd.Length == 0 && toRemove.Length == 0)
+            {
+                // Idempotency: nothing changed, make zero writes.
+                return;
+            }
+
+            if (toAdd.Length > 0)
+            {
+                // At Debug: if the same items keep reappearing here run after run, the host is
+                // accepting the add without persisting the membership for those item types, and the
+                // type breakdown is the only visible symptom of that.
+                _logger.Debug(
+                    "Auto Collections NG: collection '{0}' needs {1} item(s) added, type(s): {2}.",
+                    collectionName,
+                    toAdd.Length,
+                    DescribeItemTypes(toAdd));
+
+                try
+                {
+                    await _collectionManager.AddToCollection(existing.InternalId, toAdd).ConfigureAwait(false);
+                    outcome.ItemsAdded = toAdd.Length;
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Failed to add {toAdd.Length} item(s) (internal ids: {FormatIds(toAdd)}) to collection '{collectionName}': {ex.Message}");
+                    _logger.ErrorException("Auto Collections NG: failed to add item(s) (internal ids: {0}) to collection '{1}'", ex, FormatIds(toAdd), collectionName);
+                }
+            }
+
+            if (toRemove.Length > 0)
+            {
+                if (existing is BoxSet existingBoxSet)
+                {
+                    try
+                    {
+                        _collectionManager.RemoveFromCollection(existingBoxSet, toRemove);
+                        outcome.ItemsRemoved = toRemove.Length;
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Errors.Add($"Failed to remove {toRemove.Length} item(s) (internal ids: {FormatIds(toRemove)}) from collection '{collectionName}': {ex.Message}");
+                        _logger.ErrorException("Auto Collections NG: failed to remove item(s) (internal ids: {0}) from collection '{1}'", ex, FormatIds(toRemove), collectionName);
+                    }
+                }
+                else
+                {
+                    // RemoveFromCollection requires a BoxSet specifically; this shouldn't happen since
+                    // LoadExistingCollections only queries IncludeItemTypes=["BoxSet"], but guard
+                    // against it rather than silently dropping the removal.
+                    result.Errors.Add($"Collection '{collectionName}' has {toRemove.Length} stale member(s) but isn't a BoxSet (actual type: {existing.GetType().Name}); skipping removal.");
+                    _logger.Error("Auto Collections NG: collection '{0}' has stale members but isn't a BoxSet (actual type: {1}); skipping removal.", collectionName, existing.GetType().Name);
+                }
+            }
+
+            if (outcome.ItemsAdded > 0 || outcome.ItemsRemoved > 0)
+            {
+                _logger.Info(
+                    "Auto Collections NG: updated collection '{0}': +{1} / -{2}.",
+                    collectionName,
+                    outcome.ItemsAdded,
+                    outcome.ItemsRemoved);
+                result.Collections.Add(outcome);
+            }
+        }
+    }
+}
