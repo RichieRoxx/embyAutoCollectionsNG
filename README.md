@@ -5,13 +5,15 @@ configurable title rules (regex or contains) — primarily for **TV recordings**
 from an OpenViX/Vu+ receiver. Fully local: no cloud, no online metadata, no
 open ports.
 
-> **Status:** Feature-complete for v0.1.0. All planned work packages
-> (GitHub issues #2–#10) are implemented and tested (77 unit tests). See
+> **Status:** v0.1.0 — feature-complete and **verified end-to-end against a
+> live Emby 4.9.5 server** (Synology DSM). All planned work packages (GitHub
+> issues #2–#10) are implemented and covered by 80 unit tests. Collections are
+> created, populated and shown in the Emby UI, the dashboard config page loads
+> and saves, and a second sync run makes zero writes. See
 > [`docs/PLAN.md`](docs/PLAN.md) for the roadmap and
-> [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md) /
-> [`docs/api-notes.md`](docs/api-notes.md) for what's confirmed vs. what
-> still needs verification against a real Emby server (see
-> [Known limitations](#known-limitations--open-items) below).
+> [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md) for the
+> verified Emby API surface, including several behaviours that are easy to get
+> wrong (see [Known limitations](#known-limitations--open-items)).
 
 ## Why?
 
@@ -37,6 +39,10 @@ Example filenames of such recordings:
   filename), a filename fallback, library filter, and item type filter.
 - Matches against the **Emby item title**, with an optional fallback to the
   filename/path.
+- **Ignores Live TV guide data.** EPG entries (`LiveTvProgram`) are not library
+  content and are silently rejected by Emby as collection members; on a DVR
+  setup they also vastly outnumber real recordings. They are excluded from
+  matching, along with library-structure folders and existing collections.
 - **Title normalization** for receiver recordings: strips the leading
   date/time prefix and channel name, normalizes Unicode/whitespace — e.g.
   `20260719 2142 - ZDF neo HD - heute-show extra - Das Quiz` becomes
@@ -104,21 +110,25 @@ button that triggers an immediate sync independent of the daily schedule.
 A log excerpt from a scheduled/manual run (`AutoCollectionsSyncTask`,
 `ILogger` output at Info/Debug level):
 
+Real output from the live server this was verified on — first a run that
+creates a collection, then an immediate second run showing idempotency:
+
 ```
 Auto Collections NG: starting scheduled/manual sync.
-Auto Collections NG: created collection 'Formel 1' with 3 item(s).
-Auto Collections NG: updated collection 'heute-show': +2 / -1.
-Auto Collections NG: sync finished. Items scanned=842, skipped (no title)=1, collections created=1, updated=1, deleted=0, errors=0.
-Auto Collections NG: rule 'Formel 1' matched 3 item(s).
-Auto Collections NG: rule 'heute-show' matched 5 item(s).
-Auto Collections NG: rule 'ZDF Magazin Royale' matched 0 item(s).
+Auto Collections NG: creating 'heute show' for 8 item(s) of type(s): Episode x8.
+Auto Collections NG: using collections folder 'Collections' (internalId 204456).
+Auto Collections NG: created collection 'heute show' (internalId 204459) with 8 item(s).
+Auto Collections NG: sync finished. Items scanned=3648, skipped (no title)=0, collections created=1, updated=0, deleted=0, errors=0.
+
+Auto Collections NG: starting scheduled/manual sync.
+Auto Collections NG: sync finished. Items scanned=3649, skipped (no title)=0, collections created=0, updated=0, deleted=0, errors=0.
 ```
 
 ## Build
 
 ```bash
 dotnet build -c Release     # produces src/Emby.AutoCollectionsNG/bin/Release/netstandard2.0/Emby.AutoCollectionsNG.dll
-dotnet test                 # 77 unit tests: matching engine, config round-trip, sync engine, scheduled task, event trigger, config UI
+dotnet test                 # 80 unit tests: matching engine, config round-trip, sync engine, scheduled task, event trigger, config UI
 ```
 
 - Language/runtime: C#, target `netstandard2.0`
@@ -148,57 +158,65 @@ dotnet test                 # 77 unit tests: matching engine, config round-trip,
    - Windows: `%AppData%\Emby-Server\plugins`
    - Linux: typically `/var/lib/emby/plugins`
    - Docker: `/config/plugins`
+   - Synology (DSM package): `/volume1/@appdata/EmbyServer/plugins` — the files
+     must be owned by the `emby` user and readable by it (`chown emby:emby`,
+     `chmod 644`), then restart with `synopkg restart EmbyServer`
 3. Restart the Emby server. The plugin appears in the dashboard under
    *Plugins*, with its own configuration page.
 4. Configure rules in the plugin's config page (or edit the XML config
    directly) and either wait for the daily scheduled sync, click **Sync Now**,
    or let a new/changed recording trigger a debounced sync automatically.
 
-**Uncertain, flagged honestly:** whether the Emby host already has a
-compatible `System.Memory` (and friends) loaded for its own use — in which
-case shipping our own copies alongside is harmless — or whether the plugin
-genuinely needs its own copies to load at all, wasn't verified against a real
-server. Shipping them is the safe default either way.
+Shipping the `System.Memory` shim DLLs alongside the plugin was confirmed to
+work on a live server. Whether the host would also have loaded compatible
+copies on its own is still unknown, but shipping them is harmless and is the
+safe default either way.
 
 ## Known limitations / open items
 
-This project's guardrails (see [`CLAUDE.md`](CLAUDE.md)) require flagging
-what's genuinely unverified rather than presenting assumptions as confirmed.
-Everything below was built against the real, reflection-verified Emby SDK
-API surface (see [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md))
-and is exercised by unit tests, but **no live Emby server was available**
-during development to confirm live/runtime behavior:
+v0.1.0 was verified end-to-end against a live **Emby 4.9.5** server on Synology
+DSM: collections are created, populated and rendered in the Emby UI, the
+dashboard config page loads/saves, and repeated runs make zero writes. The
+items below are what remains genuinely unverified or deliberately limited.
 
-- **Collections for recordings:** static API evidence (via .NET reflection)
-  shows `ICollectionManager` places no restriction on item types, and `BoxSet`
-  is architecturally just a `Folder` — but whether the Emby web UI actually
-  renders a BoxSet of `Video`/`Episode`-typed recordings the way it renders a
-  movie collection is unconfirmed. Full writeup and a documented fallback
-  (`IPlaylistManager`) in [`docs/api-notes.md`](docs/api-notes.md).
-- **Configuration UI runtime behavior:** the config page compiles, is
-  correctly embedded and retrievable from the assembly (verified by test),
-  and is written defensively — but whether the dashboard's `ApiClient`
-  JavaScript global exists with exactly the methods the page calls
-  (`getPluginConfiguration`, `updatePluginConfiguration`, `getScheduledTasks`,
-  `startScheduledTask`), and whether plugin-config JSON uses PascalCase or
-  camelCase property names, is unconfirmed. The page reads defensively for
-  either casing; see the comment block at the top of
-  `src/Emby.AutoCollectionsNG/Configuration/configPage.html`.
-- **`LibraryFilter` matching:** implemented via a best-effort walk to an
-  item's topmost `BaseItem.Parent` ancestor and comparing its name, since
-  there's no simpler confirmed API for "which library is this item in"
-  without an extra resolution call. Documented in
+**Verified and resolved** (previously flagged as unknown):
+
+- Collections of `Episode`-typed DVR recordings do display correctly in the
+  Emby UI — the documented `IPlaylistManager` fallback is not needed.
+- The dashboard config page loads and saves; `ApiClient.getPluginConfiguration`
+  / `updatePluginConfiguration` / `getScheduledTasks` behave as assumed, and
+  plugin-config JSON uses PascalCase.
+- Shipping the `System.Memory` shim DLLs alongside the plugin works on a real
+  server.
+
+**Behaviours worth knowing** (all documented in
+[`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md)):
+
+- **Live TV guide entries can't be collection members.** Emby rejects
+  `LiveTvProgram` items silently — `CreateCollection` returns `null` if every
+  candidate is one, and `AddToCollection` accepts them but never persists.
+  They are excluded from matching. Practical consequence: write rules against
+  your **recording** titles, not against EPG titles. Recordings from a Vu+
+  receiver look like `20260419 2242 - ZDF neo HD - heute-show`, so a rule
+  matching `heute ` (with a trailing space) will find guide entries only, while
+  `heute-show` finds the recordings.
+- **`CreateCollection` needs a non-empty item list** and signals failure by
+  returning `null`, never by throwing and without any server-side log entry.
+
+**Still open:**
+
+- **`LibraryFilter` matching** is a best-effort walk to an item's topmost
+  `BaseItem.Parent` ancestor, compared by name — there is no simpler confirmed
+  API for "which library is this item in". Fine for typical setups; may not
+  hold for unusual library topologies. See
   `CollectionSyncService.GetTopAncestorName` and `docs/PLAN.md`.
-- **Large-library performance:** validated with a 12,000-item **in-memory**
-  simulation (~59ms, correct results, no accidental O(n²) behavior) — this is
-  a regression guard on the plugin's own algorithm, not a substitute for
-  testing against a real Emby database under real I/O load. See
+- **Large-library performance** is validated with a 12,000-item *in-memory*
+  simulation (~59 ms, no O(n²) behaviour) plus a real run over 3,648 items.
+  Neither is a substitute for a very large library under real I/O load. See
   [`docs/performance-notes.md`](docs/performance-notes.md).
-
-If you run this against a real Emby server, please report back on the above —
-particularly whether BoxSets of recordings display correctly and whether the
-config page loads/saves as expected — so these can be resolved with real
-evidence instead of the best-available static analysis they're built on today.
+- **Only tested on Emby 4.9.5** (Synology). The plugin compiles against SDK
+  4.9.1.90, the newest published package; other 4.9.x builds are expected to
+  work but are unverified.
 
 ## For contributors / coding agents
 
