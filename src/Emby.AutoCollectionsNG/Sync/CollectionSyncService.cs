@@ -85,71 +85,48 @@ namespace Emby.AutoCollectionsNG.Sync
         /// repository) plus a GetItemById round-trip, so the actual cause is observable from the
         /// server log instead of guessed at.
         /// </summary>
-        private void LogIdentityDiagnostics()
+        private int _diagItemsLogged;
+
+        private void LogItemIdentityDiagnostic(BaseItem item)
         {
-            void Probe(string label, DtoOptions options)
+            if (_diagItemsLogged >= 3)
             {
-                try
-                {
-                    var probe = _libraryManager.GetItemList(new InternalItemsQuery
-                    {
-                        Recursive = true,
-                        DtoOptions = options,
-                        Limit = 3
-                    });
-
-                    if (probe == null || probe.Length == 0)
-                    {
-                        _logger.Info("ACNG-DIAG [{0}]: query returned no items.", label);
-                        return;
-                    }
-
-                    foreach (var item in probe)
-                    {
-                        _logger.Info(
-                            "ACNG-DIAG [{0}]: name='{1}' internalId={2} guid={3} type={4}",
-                            label,
-                            item.Name,
-                            item.InternalId,
-                            item.Id,
-                            item.GetType().Name);
-                    }
-
-                    // Does re-fetching by Guid yield a usable InternalId? (candidate fallback)
-                    var first = probe[0];
-                    try
-                    {
-                        var refetched = _libraryManager.GetItemById(first.Id);
-                        _logger.Info(
-                            "ACNG-DIAG [{0}]: GetItemById(guid {1}) -> {2}, internalId={3}",
-                            label,
-                            first.Id,
-                            refetched == null ? "null" : refetched.Name,
-                            refetched?.InternalId);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.ErrorException("ACNG-DIAG [{0}]: GetItemById(guid) failed", ex, label);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.ErrorException("ACNG-DIAG [{0}]: probe failed", ex, label);
-                }
+                return;
             }
 
-            Probe("DtoOptions(false)", new DtoOptions(false));
-            Probe("DtoOptions(true)", new DtoOptions(true));
-            Probe("DtoOptions()", new DtoOptions());
+            _diagItemsLogged++;
+
+            try
+            {
+                _logger.Info(
+                    "ACNG-DIAG item #{0}: name='{1}' internalId={2} guid={3} type={4}",
+                    _diagItemsLogged,
+                    item.Name,
+                    item.InternalId,
+                    item.Id,
+                    item.GetType().Name);
+
+                // Candidate fallback: does re-fetching by Guid yield a usable InternalId?
+                // Deliberately GetItemById (not GetItemList) so this probe adds no extra item
+                // query - the sync's query count is asserted by the reentrancy unit test.
+                var refetched = _libraryManager.GetItemById(item.Id);
+                _logger.Info(
+                    "ACNG-DIAG item #{0}: GetItemById(guid) -> {1}, internalId={2}",
+                    _diagItemsLogged,
+                    refetched == null ? "null" : "'" + refetched.Name + "'",
+                    refetched == null ? "n/a" : refetched.InternalId.ToString());
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException("ACNG-DIAG: identity probe failed", ex);
+            }
         }
 
         public async Task<SyncResult> SyncAsync(PluginConfiguration config, IProgress<double> progress, CancellationToken cancellationToken)
         {
             var result = new SyncResult();
             _topAncestorNameCache.Clear();
-
-            // TEMPORARY DIAGNOSTIC - see LogIdentityDiagnostics().
-            LogIdentityDiagnostics();
+            _diagItemsLogged = 0;
 
             var rules = config?.Rules ?? Array.Empty<CollectionRule>();
             var enabledRules = rules.Where(r => r != null && r.Enabled).ToArray();
@@ -312,6 +289,9 @@ namespace Emby.AutoCollectionsNG.Sync
             Dictionary<CollectionRule, HashSet<long>> perRuleMatches,
             SyncResult result)
         {
+            // TEMPORARY DIAGNOSTIC - see LogItemIdentityDiagnostic().
+            LogItemIdentityDiagnostic(item);
+
             var rawTitle = item.Name;
             if (string.IsNullOrWhiteSpace(rawTitle))
             {
