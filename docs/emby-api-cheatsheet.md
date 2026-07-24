@@ -46,7 +46,7 @@ Sources: reflection against `mediabrowser.server.core` 4.9.1.90; dev.emby.media/
 | `InternalItemsQuery.Path` | ✅ | `string` — usable for the filename/path fallback match |
 | `InternalItemsQuery.StartIndex` / `Limit` | ✅ | `int?` each — use for chunked/paged queries on large libraries |
 | `InternalItemsQuery.ParentIds` / `TopParentIds` | ✅ | `long[]` — usable for the library filter |
-| `InternalItemsQuery.DtoOptions` | ✅ | `MediaBrowser.Controller.Dto.DtoOptions` — keep minimal for perf |
+| `InternalItemsQuery.DtoOptions` | ✅ | `MediaBrowser.Controller.Dto.DtoOptions` — **use `new DtoOptions(true)`. With minimal fields the returned items have no identity (`InternalId == 0`, `Id == Guid.Empty`); see the ⚠️ note below.** |
 | `ILibraryManager.ItemAdded` / `ItemAdding` / `ItemUpdated` / `ItemRemoved` | ✅ | all four events confirmed, `EventHandler<ItemChangeEventArgs>` |
 | `MediaBrowser.Controller.Library.ItemChangeEventArgs` | ✅ | `BaseItem Item`, `BaseItem Parent`, `ItemUpdateType UpdateReason`, `BaseItem[] CollectionFolders` — used by the event trigger (#8) to filter out the plugin's own BoxSet writes (check `Item is BoxSet`) and debounce on real item changes |
 
@@ -63,7 +63,41 @@ Sources: reflection against `mediabrowser.server.core` 4.9.1.90; dev.emby.media/
 properties the matching engine reads (raw title and filename/path fallback,
 respectively).
 
-Source: reflection against `mediabrowser.server.core` 4.9.1.90.
+### ⚠️ `DtoOptions` decides whether items have an identity at all
+
+**Verified on a live Emby 4.9.5 server (2026-07-24).** `InternalItemsQuery.DtoOptions`
+does not merely trim optional metadata — with a minimal-fields request the item
+repository does not materialize the identity columns:
+
+| Query | `item.Name` | `item.InternalId` | `item.Id` (Guid) |
+|---|---|---|---|
+| `DtoOptions(false)` | correct | **`0`** | **`Guid.Empty`** |
+| `DtoOptions(true)` | correct | correct (e.g. `204457`) | correct |
+
+This is silent and vicious: names, runtime types and even derived values like
+`DisplayPreferencesId` look perfectly healthy, so matching logic appears to work
+while every ID is zero. Confirmed via reflection over the live objects, and it is
+**not** an assembly-version mismatch — the plugin's `MediaBrowser.Controller`
+reference resolves to the host's own 4.9.5.0 assembly (`isBaseItem == True`).
+
+Because `ICollectionManager` addresses everything by `InternalId`, the failure
+mode is a sync that *reports success while doing nothing*:
+
+- all matched IDs collapse to the single value `0` inside a `HashSet<long>`, so
+  every rule reports exactly `1 item` no matter how many actually matched;
+- `CreateCollection` receives `ItemIdList = [0]` and persists **no BoxSet** (it
+  does create the `Collections` folder, which makes it look like it worked);
+- the existing-collection lookup finds a BoxSet with `InternalId == 0`, so each
+  run treats it as new (breaking idempotency) and
+  `AddToCollection(0, [0])` throws `ArgumentException: No collection exists with
+  the supplied Id`.
+
+So: **always `new DtoOptions(true)` for any query whose results are used by ID.**
+If this is ever narrowed for performance, re-verify that `InternalId` is still
+populated.
+
+Source: reflection against `mediabrowser.server.core` 4.9.1.90; **live-server
+observation on Emby 4.9.5.0, 2026-07-24**.
 
 ## Collections
 
@@ -79,7 +113,7 @@ Source: reflection against `mediabrowser.server.core` 4.9.1.90.
 | Reading current members of a BoxSet | ✅ | `Folder.GetChildren(InternalItemsQuery)` (also `GetChildren(User)` / `GetRecursiveChildren()`) — **not virtual**, and on a `Folder`/`BoxSet` instance not attached to a live Emby host it always returns an empty array regardless of conceptual contents. Not testable directly; `CollectionSyncService` routes membership reads through an injectable delegate instead (see `docs/PLAN.md` #6). |
 | `MediaBrowser.Controller.Library.DeleteOptions` | ✅ | parameterless ctor; `DeleteFileLocation` (bool), `DeleteFromExternalProvider` (bool), `CollectionFolders` (`BaseItem[]`) — used with `ILibraryManager.DeleteItem(BaseItem, DeleteOptions)` to remove an empty collection |
 | `MediaBrowser.Model.Logging.ILogger` | ✅ | `Info/Warn/Debug/Error(string message, object[] paramList)` (i.e. `params object[]`, string-format style), `ErrorException(string, Exception, object[])`, `FatalException(...)`. **Gotcha:** also declares `ReadOnlyMemory<char>`-based overloads, which pulls in a transitive need for the `System.Memory` NuGet package even if you only call the `string`-based overloads — a netstandard2.0 project referencing this interface won't compile without it (see `Emby.AutoCollectionsNG.csproj`). **Packaging consequence (issue #11):** `dotnet publish` shows `System.Memory` itself transitively brings in `System.Buffers.dll`, `System.Numerics.Vectors.dll`, and `System.Runtime.CompilerServices.Unsafe.dll` — a plain `dotnet build` output folder does **not** include any of these (class libraries aren't copy-local by default), only `dotnet publish` does. All four must ship alongside `Emby.AutoCollectionsNG.dll` in the Emby `plugins` folder; the `MediaBrowser.*.dll`/`Emby.*.dll` files `publish` also copies must NOT be shipped since the Emby host provides those itself. Whether the host already has a compatible `System.Memory` loaded for its own use (making our copies redundant-but-harmless) vs. genuinely needing ours to load at all was not verified against a real server — see README "Known limitations". |
-| `MediaBrowser.Controller.Dto.DtoOptions` | ✅ | has a parameterless ctor plus `DtoOptions(bool allFields)` and `DtoOptions(ItemFields[] fields)` — `new DtoOptions(false)` is a valid minimal-fields instantiation |
+| `MediaBrowser.Controller.Dto.DtoOptions` | ✅ | has a parameterless ctor plus `DtoOptions(bool allFields)` and `DtoOptions(ItemFields[] fields)`. `new DtoOptions(false)` compiles and runs, but **items then come back without `InternalId`/`Id`** — use `new DtoOptions(true)` whenever results are addressed by ID (see the ⚠️ note under "Querying items") |
 | `MediaBrowser.Controller.Entities.Movies.Movie` | ✅ | extends `Video`; implements `ISupportsBoxSetGrouping` (movie-specific auto-grouping — **not** required for manual `AddToCollection`) |
 | `MediaBrowser.Controller.Entities.TV.Episode`, `MediaBrowser.Controller.Entities.Video` | ✅ | both extend `BaseItem`/`Video`; **no type restriction visible on `AddToCollection`'s signature itself** — it takes plain `long[]` IDs regardless of item type |
 

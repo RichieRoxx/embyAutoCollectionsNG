@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Emby.AutoCollectionsNG.Configuration;
 using Emby.AutoCollectionsNG.Sync;
 using MediaBrowser.Controller.Collections;
+using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Logging;
@@ -731,6 +732,64 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             Assert.True(
                 stopwatch.Elapsed < TimeSpan.FromSeconds(10),
                 $"Sync of {itemCount} items took {stopwatch.Elapsed}, which is suspiciously slow - possible algorithmic regression.");
+        }
+
+        /// <summary>
+        /// Regression guard for a live-server failure that no mock can reproduce (see
+        /// docs/emby-api-cheatsheet.md, "DtoOptions decides whether items have an identity at all").
+        ///
+        /// On a real Emby 4.9.5 server, querying with <c>new DtoOptions(false)</c> returns items
+        /// whose <c>InternalId</c> is 0 and whose <c>Id</c> is <see cref="Guid.Empty"/>, while
+        /// names and types look perfectly fine. Since <c>ICollectionManager</c> addresses
+        /// everything by <c>InternalId</c>, the sync then silently does nothing while reporting
+        /// success: every rule collapses to "1 item" (all IDs are the same 0 in a HashSet),
+        /// CreateCollection persists no BoxSet, and AddToCollection throws "No collection exists
+        /// with the supplied Id".
+        ///
+        /// Mocks happily return fully-populated items regardless of DtoOptions, so the only thing
+        /// a unit test can protect is the request itself: every query this service issues must ask
+        /// for all fields.
+        /// </summary>
+        [Fact]
+        public async Task SyncAsync_AlwaysQueriesWithAllFields_SoReturnedItemsCarryTheirInternalId()
+        {
+            var capturedQueries = new List<InternalItemsQuery>();
+
+            var library = new Mock<ILibraryManager>();
+            library
+                .Setup(m => m.GetItemList(It.IsAny<InternalItemsQuery>()))
+                .Returns((InternalItemsQuery q) =>
+                {
+                    capturedQueries.Add(q);
+                    return q.IncludeItemTypes != null && q.IncludeItemTypes.Contains("BoxSet")
+                        ? Array.Empty<BaseItem>()
+                        : new BaseItem[] { MakeItem(1, "Formel 1 - Qualifying") };
+                });
+
+            var collections = new Mock<ICollectionManager>();
+            collections
+                .Setup(m => m.CreateCollection(It.IsAny<CollectionCreationOptions>()))
+                .ReturnsAsync((CollectionCreationOptions o) => new BoxSet { Name = o.Name, InternalId = 9999 });
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[] { Rule("Formel 1", RuleMatchType.Contains, "Formel 1") }
+            };
+
+            var service = new CollectionSyncService(library.Object, collections.Object, new Mock<ILogger>().Object);
+            await service.SyncAsync(config, null, CancellationToken.None);
+
+            Assert.NotEmpty(capturedQueries);
+
+            // "All fields" is expressed as whatever DtoOptions(true) produces, so this stays correct
+            // if Emby ever adds new ItemFields values.
+            var allFieldsCount = new DtoOptions(true).Fields?.Length ?? 0;
+
+            foreach (var query in capturedQueries)
+            {
+                Assert.NotNull(query.DtoOptions);
+                Assert.Equal(allFieldsCount, query.DtoOptions.Fields?.Length ?? 0);
+            }
         }
     }
 }

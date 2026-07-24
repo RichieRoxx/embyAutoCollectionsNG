@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.AutoCollectionsNG.Configuration;
@@ -71,112 +70,10 @@ namespace Emby.AutoCollectionsNG.Sync
             return (children ?? Array.Empty<BaseItem>()).Select(c => c.InternalId).ToArray();
         }
 
-        /// <summary>
-        /// TEMPORARY DIAGNOSTIC - remove once the InternalId root cause is settled.
-        ///
-        /// Against a live Emby 4.9.5 server every <see cref="BaseItem"/> returned by
-        /// <see cref="ILibraryManager.GetItemList"/> came back with <c>InternalId == 0</c>, which
-        /// silently broke the whole sync: all matched IDs collapsed to the single value 0 in the
-        /// per-rule HashSet (hence "created collection X with 1 item(s)" regardless of how many
-        /// items matched), CreateCollection got ItemIdList=[0] and persisted no BoxSet at all, and
-        /// AddToCollection threw "No collection exists with the supplied Id".
-        ///
-        /// This probe logs the raw identity values for a few items under three different
-        /// DtoOptions settings (the prime suspect, since that's what the query passes to the item
-        /// repository) plus a GetItemById round-trip, so the actual cause is observable from the
-        /// server log instead of guessed at.
-        /// </summary>
-        private int _diagItemsLogged;
-
-        private void LogItemIdentityDiagnostic(BaseItem item)
-        {
-            if (_diagItemsLogged >= 3)
-            {
-                return;
-            }
-
-            _diagItemsLogged++;
-
-            try
-            {
-                _logger.Info(
-                    "ACNG-DIAG item #{0}: name='{1}' internalId={2} guid={3} type={4}",
-                    _diagItemsLogged,
-                    item.Name,
-                    item.InternalId,
-                    item.Id,
-                    item.GetType().Name);
-
-                if (_diagItemsLogged > 1)
-                {
-                    return;
-                }
-
-                // Both Id (Guid) and InternalId (long) read back as default while Name and the
-                // runtime type are correct. Two competing explanations: (a) the objects genuinely
-                // carry no identity, or (b) we are binding to different members than the ones the
-                // running host populates (compile-time SDK 4.9.1.90 vs runtime Emby 4.9.5.0).
-                // Reflection over the live object settles it - and the assembly identities below
-                // test (b) directly.
-                var runtimeType = item.GetType();
-                _logger.Info(
-                    "ACNG-DIAG asm: compiled-BaseItem='{0}' runtime-itemType='{1}' asm='{2}' isBaseItem={3}",
-                    typeof(BaseItem).Assembly.FullName,
-                    runtimeType.FullName,
-                    runtimeType.Assembly.FullName,
-                    item is BaseItem);
-
-                foreach (var prop in runtimeType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                {
-                    if (prop.Name.IndexOf("id", StringComparison.OrdinalIgnoreCase) < 0 || prop.GetIndexParameters().Length > 0)
-                    {
-                        continue;
-                    }
-
-                    string value;
-                    try
-                    {
-                        value = Convert.ToString(prop.GetValue(item)) ?? "null";
-                    }
-                    catch (Exception ex)
-                    {
-                        value = "<threw " + ex.GetType().Name + ">";
-                    }
-
-                    _logger.Info("ACNG-DIAG prop {0} ({1}) = {2}", prop.Name, prop.PropertyType.Name, value);
-                }
-
-                foreach (var field in runtimeType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
-                {
-                    if (field.Name.IndexOf("id", StringComparison.OrdinalIgnoreCase) < 0)
-                    {
-                        continue;
-                    }
-
-                    string value;
-                    try
-                    {
-                        value = Convert.ToString(field.GetValue(item)) ?? "null";
-                    }
-                    catch (Exception ex)
-                    {
-                        value = "<threw " + ex.GetType().Name + ">";
-                    }
-
-                    _logger.Info("ACNG-DIAG field {0} ({1}) = {2}", field.Name, field.FieldType.Name, value);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.ErrorException("ACNG-DIAG: identity probe failed", ex);
-            }
-        }
-
         public async Task<SyncResult> SyncAsync(PluginConfiguration config, IProgress<double> progress, CancellationToken cancellationToken)
         {
             var result = new SyncResult();
             _topAncestorNameCache.Clear();
-            _diagItemsLogged = 0;
 
             var rules = config?.Rules ?? Array.Empty<CollectionRule>();
             var enabledRules = rules.Where(r => r != null && r.Enabled).ToArray();
@@ -315,12 +212,16 @@ namespace Emby.AutoCollectionsNG.Sync
             var query = new InternalItemsQuery
             {
                 Recursive = true,
-                // DIAGNOSTIC/CANDIDATE FIX: was DtoOptions(false). Against the live server every
-                // returned BaseItem had InternalId == 0 and Id == Guid.Empty (confirmed by
-                // reflection, and not an assembly-version mismatch - the reference resolves to the
-                // host's own MediaBrowser.Controller 4.9.5.0). DtoOptions is what the query hands
-                // the item repository to decide which columns it materializes, so a minimal-fields
-                // request is the prime suspect for identity columns not being populated.
+                // MUST be all-fields. With `new DtoOptions(false)` the Emby item repository does
+                // not materialize the identity columns: every returned BaseItem came back with
+                // InternalId == 0 and Id == Guid.Empty (verified on a live Emby 4.9.5 server, and
+                // confirmed via reflection - it is not an assembly mismatch). That silently broke
+                // the entire sync, since ICollectionManager addressses items by InternalId: all
+                // matched IDs collapsed to the single value 0 in the per-rule HashSet, so every
+                // rule reported "1 item", CreateCollection received ItemIdList=[0] and persisted
+                // no BoxSet at all, and AddToCollection threw "No collection exists with the
+                // supplied Id". Do not "optimize" this back to minimal fields without re-verifying
+                // that InternalId survives. See docs/emby-api-cheatsheet.md, "Querying items".
                 DtoOptions = new DtoOptions(true)
             };
 
@@ -345,9 +246,6 @@ namespace Emby.AutoCollectionsNG.Sync
             Dictionary<CollectionRule, HashSet<long>> perRuleMatches,
             SyncResult result)
         {
-            // TEMPORARY DIAGNOSTIC - see LogItemIdentityDiagnostic().
-            LogItemIdentityDiagnostic(item);
-
             var rawTitle = item.Name;
             if (string.IsNullOrWhiteSpace(rawTitle))
             {
@@ -454,9 +352,11 @@ namespace Emby.AutoCollectionsNG.Sync
                 {
                     IncludeItemTypes = new[] { "BoxSet" },
                     Recursive = true,
-                    // See BuildItemQuery: was DtoOptions(false); the returned BoxSet also came back
-                    // with InternalId == 0, which is what makes AddToCollection throw
-                    // "No collection exists with the supplied Id".
+                    // All-fields for the same reason as BuildItemQuery: with minimal fields the
+                    // returned BoxSet also carries InternalId == 0, so the collection could never
+                    // be matched to an existing one (every run re-"created" it) and
+                    // AddToCollection(existing.InternalId, ...) threw "No collection exists with
+                    // the supplied Id".
                     DtoOptions = new DtoOptions(true)
                 });
             }
@@ -481,14 +381,6 @@ namespace Emby.AutoCollectionsNG.Sync
                     _logger.Warn("Auto Collections NG: found more than one collection named '{0}'; using the first one found and ignoring the rest.", collection.Name);
                     continue;
                 }
-
-                // TEMPORARY DIAGNOSTIC - see LogIdentityDiagnostics().
-                _logger.Info(
-                    "ACNG-DIAG existing collection: name='{0}' internalId={1} guid={2} type={3}",
-                    collection.Name,
-                    collection.InternalId,
-                    collection.Id,
-                    collection.GetType().Name);
 
                 byName[collection.Name] = collection;
             }
