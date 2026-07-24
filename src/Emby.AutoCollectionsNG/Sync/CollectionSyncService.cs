@@ -70,10 +70,86 @@ namespace Emby.AutoCollectionsNG.Sync
             return (children ?? Array.Empty<BaseItem>()).Select(c => c.InternalId).ToArray();
         }
 
+        /// <summary>
+        /// TEMPORARY DIAGNOSTIC - remove once the InternalId root cause is settled.
+        ///
+        /// Against a live Emby 4.9.5 server every <see cref="BaseItem"/> returned by
+        /// <see cref="ILibraryManager.GetItemList"/> came back with <c>InternalId == 0</c>, which
+        /// silently broke the whole sync: all matched IDs collapsed to the single value 0 in the
+        /// per-rule HashSet (hence "created collection X with 1 item(s)" regardless of how many
+        /// items matched), CreateCollection got ItemIdList=[0] and persisted no BoxSet at all, and
+        /// AddToCollection threw "No collection exists with the supplied Id".
+        ///
+        /// This probe logs the raw identity values for a few items under three different
+        /// DtoOptions settings (the prime suspect, since that's what the query passes to the item
+        /// repository) plus a GetItemById round-trip, so the actual cause is observable from the
+        /// server log instead of guessed at.
+        /// </summary>
+        private void LogIdentityDiagnostics()
+        {
+            void Probe(string label, DtoOptions options)
+            {
+                try
+                {
+                    var probe = _libraryManager.GetItemList(new InternalItemsQuery
+                    {
+                        Recursive = true,
+                        DtoOptions = options,
+                        Limit = 3
+                    });
+
+                    if (probe == null || probe.Length == 0)
+                    {
+                        _logger.Info("ACNG-DIAG [{0}]: query returned no items.", label);
+                        return;
+                    }
+
+                    foreach (var item in probe)
+                    {
+                        _logger.Info(
+                            "ACNG-DIAG [{0}]: name='{1}' internalId={2} guid={3} type={4}",
+                            label,
+                            item.Name,
+                            item.InternalId,
+                            item.Id,
+                            item.GetType().Name);
+                    }
+
+                    // Does re-fetching by Guid yield a usable InternalId? (candidate fallback)
+                    var first = probe[0];
+                    try
+                    {
+                        var refetched = _libraryManager.GetItemById(first.Id);
+                        _logger.Info(
+                            "ACNG-DIAG [{0}]: GetItemById(guid {1}) -> {2}, internalId={3}",
+                            label,
+                            first.Id,
+                            refetched == null ? "null" : refetched.Name,
+                            refetched?.InternalId);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.ErrorException("ACNG-DIAG [{0}]: GetItemById(guid) failed", ex, label);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.ErrorException("ACNG-DIAG [{0}]: probe failed", ex, label);
+                }
+            }
+
+            Probe("DtoOptions(false)", new DtoOptions(false));
+            Probe("DtoOptions(true)", new DtoOptions(true));
+            Probe("DtoOptions()", new DtoOptions());
+        }
+
         public async Task<SyncResult> SyncAsync(PluginConfiguration config, IProgress<double> progress, CancellationToken cancellationToken)
         {
             var result = new SyncResult();
             _topAncestorNameCache.Clear();
+
+            // TEMPORARY DIAGNOSTIC - see LogIdentityDiagnostics().
+            LogIdentityDiagnostics();
 
             var rules = config?.Rules ?? Array.Empty<CollectionRule>();
             var enabledRules = rules.Where(r => r != null && r.Enabled).ToArray();
@@ -366,6 +442,14 @@ namespace Emby.AutoCollectionsNG.Sync
                     _logger.Warn("Auto Collections NG: found more than one collection named '{0}'; using the first one found and ignoring the rest.", collection.Name);
                     continue;
                 }
+
+                // TEMPORARY DIAGNOSTIC - see LogIdentityDiagnostics().
+                _logger.Info(
+                    "ACNG-DIAG existing collection: name='{0}' internalId={1} guid={2} type={3}",
+                    collection.Name,
+                    collection.InternalId,
+                    collection.Id,
+                    collection.GetType().Name);
 
                 byName[collection.Name] = collection;
             }
