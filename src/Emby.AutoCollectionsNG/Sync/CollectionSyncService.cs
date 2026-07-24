@@ -42,56 +42,18 @@ namespace Emby.AutoCollectionsNG.Sync
         // can never report members).
         private readonly Func<BaseItem, long[]> _collectionMemberIdsProvider;
 
-        // Optional: only used to populate CollectionCreationOptions.UserIds. Nullable so the test
-        // seam and any host that doesn't supply it still work.
-        private readonly IUserManager _userManager;
-
         public CollectionSyncService(
             ILibraryManager libraryManager,
             ICollectionManager collectionManager,
             ILogger logger,
             RuleMatcher ruleMatcher = null,
-            Func<BaseItem, long[]> collectionMemberIdsProvider = null,
-            IUserManager userManager = null)
+            Func<BaseItem, long[]> collectionMemberIdsProvider = null)
         {
             _libraryManager = libraryManager ?? throw new ArgumentNullException(nameof(libraryManager));
             _collectionManager = collectionManager ?? throw new ArgumentNullException(nameof(collectionManager));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _ruleMatcher = ruleMatcher ?? new RuleMatcher();
             _collectionMemberIdsProvider = collectionMemberIdsProvider ?? GetCollectionMemberIds;
-            _userManager = userManager;
-        }
-
-        /// <summary>
-        /// Internal IDs of all users, for <see cref="CollectionCreationOptions.UserIds"/>.
-        ///
-        /// Emby's own dashboard creates collections through
-        /// <c>POST /Collections?Name=...&amp;Ids=...&amp;userId=...</c> - it always supplies a user.
-        /// Creating one from a scheduled task with no user context returns <c>null</c> and persists
-        /// nothing (verified on a live 4.9.5 server, including with ParentId pointed explicitly at
-        /// the 'boxsets' library folder, which did not help). Supplying the users is the remaining
-        /// difference between our call and the one that demonstrably works.
-        /// </summary>
-        private long[] GetUserIdsForCreation()
-        {
-            if (_userManager == null)
-            {
-                return Array.Empty<long>();
-            }
-
-            try
-            {
-                return (_userManager.Users ?? Enumerable.Empty<User>())
-                    .Where(u => u != null)
-                    .Select(u => u.InternalId)
-                    .Where(id => id != 0)
-                    .ToArray();
-            }
-            catch (Exception ex)
-            {
-                _logger.ErrorException("Auto Collections NG: could not read the user list for collection creation", ex);
-                return Array.Empty<long>();
-            }
         }
 
         /// <summary>
@@ -103,9 +65,8 @@ namespace Emby.AutoCollectionsNG.Sync
         /// persisted members reported zero children). Because the reconciliation diffs desired
         /// against current membership, that made every run re-add every member - the sync logged
         /// "+107 / -0" on a collection that already contained those items, breaking the idempotency
-        /// requirement. <see cref="InternalItemsQuery.ParentIds"/> does not work either: a BoxSet's
-        /// members are linked children rather than filesystem-style children, so the collection has
-        /// to be addressed via <c>CollectionIds</c>.
+        /// requirement. <see cref="InternalItemsQuery.ParentIds"/> does not work either - a BoxSet's
+        /// members are linked children - so the collection is addressed via <c>CollectionIds</c>.
         /// </summary>
         private long[] GetCollectionMemberIds(BaseItem collection)
         {
@@ -116,10 +77,10 @@ namespace Emby.AutoCollectionsNG.Sync
 
             var members = _libraryManager.GetItemList(new InternalItemsQuery
             {
-                // CollectionIds, not ParentIds: a BoxSet's members are linked children, not
-                // filesystem-style children. Querying by ParentIds returned nothing for a
-                // collection that demonstrably held 90 members, which is what made every run
-                // re-add everything.
+                // CollectionIds, not ParentIds: a BoxSet's members are linked children rather than
+                // filesystem-style children, and ParentIds returns nothing for a collection that
+                // demonstrably holds members. Emby switched collection membership queries from
+                // ListIds to CollectionIds in 4.6 (Emby developer forum, topic 90515).
                 CollectionIds = new[] { collection.InternalId },
                 // All fields, or the returned members come back with InternalId 0 - see BuildItemQuery.
                 DtoOptions = new DtoOptions(true)
@@ -132,6 +93,9 @@ namespace Emby.AutoCollectionsNG.Sync
         {
             var result = new SyncResult();
             _topAncestorNameCache.Clear();
+            // Re-resolve per run, so a collections folder created between runs is picked up.
+            _collectionsFolder = null;
+            _collectionsFolderResolved = false;
 
             var rules = config?.Rules ?? Array.Empty<CollectionRule>();
             var enabledRules = rules.Where(r => r != null && r.Enabled).ToArray();
@@ -298,12 +262,34 @@ namespace Emby.AutoCollectionsNG.Sync
             return query;
         }
 
+        // Library-structure containers that are returned by an unfiltered item query but must never
+        // end up in a collection's ItemIdList. Passing one of these to CreateCollection is a strong
+        // candidate for the host rejecting the whole call. Matched by runtime type name rather than
+        // `is` checks so this stays compilable regardless of which of these types the SDK exposes
+        // publicly in a given version.
+        private static readonly HashSet<string> StructuralItemTypes = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "AggregateFolder",
+            "UserRootFolder",
+            "CollectionFolder",
+            "UserView",
+            "Folder",
+            "BoxSet"
+        };
+
         private void ProcessItem(
             BaseItem item,
             List<CollectionRule> validRules,
             Dictionary<CollectionRule, HashSet<long>> perRuleMatches,
             SyncResult result)
         {
+            if (StructuralItemTypes.Contains(item.GetType().Name))
+            {
+                // 'root', 'Media Folders', the per-library folders and existing collections
+                // themselves - never collection members.
+                return;
+            }
+
             var rawTitle = item.Name;
             if (string.IsNullOrWhiteSpace(rawTitle))
             {
@@ -446,27 +432,31 @@ namespace Emby.AutoCollectionsNG.Sync
             return byName;
         }
 
+        // Resolved once per sync: the library's "collections" folder, which new BoxSets are
+        // created under. Null means "not found"; _collectionsFolderResolved distinguishes that
+        // from "not looked up yet" so a miss isn't re-queried for every rule.
+        private BaseItem _collectionsFolder;
+        private bool _collectionsFolderResolved;
+
         /// <summary>
-        /// Second attempt at creating a collection, with <see cref="CollectionCreationOptions.ParentId"/>
-        /// pointed explicitly at the library's collections folder.
+        /// Finds the library's collections folder, identified by <c>CollectionType == "boxsets"</c>
+        /// rather than by its display name (which is user-visible and localizable).
         ///
-        /// Background (live Emby 4.9.5): calling <c>CreateCollection</c> with only Name+ItemIdList
-        /// returns <c>null</c> and persists nothing - no exception, no server-side log entry. The
-        /// host resolves the parent collections folder itself in that case, and a null result is
-        /// consistent with that internal lookup coming up empty when nothing tells it which folder
-        /// to use.
-        ///
-        /// The folder is identified by <c>CollectionType == "boxsets"</c> rather than by its
-        /// display name, which is user-visible and localizable. <c>CollectionType</c> is read
-        /// reflectively on purpose: it is not part of the API surface confirmed in
-        /// docs/emby-api-cheatsheet.md, so this reads it defensively and falls back to matching the
-        /// folder name instead of assuming a compile-time member that may not exist.
+        /// New collections are created with <see cref="CollectionCreationOptions.ParentId"/> set to
+        /// this folder, mirroring the reference Emby plugin that reliably creates collections from
+        /// a scheduled task. <c>CollectionType</c> is read reflectively because it is not part of
+        /// the API surface confirmed in docs/emby-api-cheatsheet.md; the folder name is used as a
+        /// fallback so a missing property degrades rather than breaks.
         /// </summary>
-        private async Task<BoxSet> TryCreateInCollectionsFolderAsync(
-            string collectionName,
-            HashSet<long> desiredIds,
-            SyncResult result)
+        private BaseItem GetCollectionsFolder()
         {
+            if (_collectionsFolderResolved)
+            {
+                return _collectionsFolder;
+            }
+
+            _collectionsFolderResolved = true;
+
             BaseItem[] folders;
             try
             {
@@ -474,6 +464,7 @@ namespace Emby.AutoCollectionsNG.Sync
                 {
                     IncludeItemTypes = new[] { "CollectionFolder" },
                     Recursive = true,
+                    IsFolder = true,
                     DtoOptions = new DtoOptions(true)
                 });
             }
@@ -483,60 +474,43 @@ namespace Emby.AutoCollectionsNG.Sync
                 return null;
             }
 
-            BaseItem target = null;
+            BaseItem byName = null;
             foreach (var folder in folders ?? Array.Empty<BaseItem>())
             {
-                var collectionType = ReadCollectionType(folder);
-                _logger.Info(
-                    "Auto Collections NG: candidate library folder '{0}' (internalId {1}, collectionType '{2}').",
-                    folder.Name,
-                    folder.InternalId,
-                    collectionType ?? "<none>");
-
-                if (string.Equals(collectionType, "boxsets", StringComparison.OrdinalIgnoreCase)
-                    || (target == null && string.Equals(folder.Name, "Collections", StringComparison.OrdinalIgnoreCase)))
+                if (folder == null || folder.InternalId == 0)
                 {
-                    target = folder;
+                    continue;
+                }
+
+                if (string.Equals(ReadCollectionType(folder), "boxsets", StringComparison.OrdinalIgnoreCase))
+                {
+                    _collectionsFolder = folder;
+                    _logger.Info(
+                        "Auto Collections NG: using collections folder '{0}' (internalId {1}).",
+                        folder.Name,
+                        folder.InternalId);
+                    return _collectionsFolder;
+                }
+
+                if (byName == null && string.Equals(folder.Name, "Collections", StringComparison.OrdinalIgnoreCase))
+                {
+                    byName = folder;
                 }
             }
 
-            if (target == null || target.InternalId == 0)
+            _collectionsFolder = byName;
+            if (_collectionsFolder == null)
             {
-                _logger.Error("Auto Collections NG: no usable collections folder found, cannot create '{0}'.", collectionName);
-                return null;
+                _logger.Warn("Auto Collections NG: no collections folder found; new collections will be created without an explicit parent.");
             }
 
-            try
-            {
-                var created = await _collectionManager.CreateCollection(new CollectionCreationOptions
-                {
-                    Name = collectionName,
-                    ItemIdList = desiredIds.ToArray(),
-                    ParentId = target.InternalId,
-                    UserIds = GetUserIdsForCreation()
-                }).ConfigureAwait(false);
-
-                _logger.Info(
-                    "Auto Collections NG: retried creating '{0}' under folder '{1}' (internalId {2}) -> {3}.",
-                    collectionName,
-                    target.Name,
-                    target.InternalId,
-                    created == null ? "still null" : "internalId " + created.InternalId);
-
-                return created;
-            }
-            catch (Exception ex)
-            {
-                result.Errors.Add($"Retrying creation of collection '{collectionName}' under the collections folder failed: {ex.Message}");
-                _logger.ErrorException("Auto Collections NG: retrying creation of '{0}' failed", ex, collectionName);
-                return null;
-            }
+            return _collectionsFolder;
         }
 
         /// <summary>
         /// Reads a library folder's <c>CollectionType</c> reflectively, returning null when the
-        /// property doesn't exist or can't be read. See <see cref="TryCreateInCollectionsFolderAsync"/>
-        /// for why this isn't a direct member access.
+        /// property doesn't exist or can't be read. See <see cref="GetCollectionsFolder"/> for why
+        /// this isn't a direct member access.
         /// </summary>
         private static string ReadCollectionType(BaseItem folder)
         {
@@ -575,22 +549,23 @@ namespace Emby.AutoCollectionsNG.Sync
                     // persisted anything: CreateCollection can return without throwing while no
                     // BoxSet ends up in the library, in which case reporting "created" would be a
                     // phantom success that also breaks the next run's idempotency check.
-                    var created = await _collectionManager.CreateCollection(new CollectionCreationOptions
+                    // ParentId is set up-front, not as a fallback: the reference Emby plugin that
+                    // reliably creates collections from a scheduled task always resolves the
+                    // 'boxsets' library folder first and passes its InternalId.
+                    var options = new CollectionCreationOptions
                     {
+                        IsLocked = false,
                         Name = collectionName,
-                        ItemIdList = desiredIds.ToArray(),
-                        UserIds = GetUserIdsForCreation()
-                    }).ConfigureAwait(false);
+                        ItemIdList = desiredIds.ToArray()
+                    };
 
-                    if (created == null || created.InternalId == 0)
+                    var collectionsFolder = GetCollectionsFolder();
+                    if (collectionsFolder != null)
                     {
-                        // The host bailed out internally without throwing. Its collection manager
-                        // resolves a parent "collections" library folder itself when the options
-                        // don't name one, and returning null is what that lookup failing looks
-                        // like from out here - so retry once, explicitly pointing ParentId at the
-                        // library's collections folder.
-                        created = await TryCreateInCollectionsFolderAsync(collectionName, desiredIds, result).ConfigureAwait(false);
+                        options.ParentId = collectionsFolder.InternalId;
                     }
+
+                    var created = await _collectionManager.CreateCollection(options).ConfigureAwait(false);
 
                     if (created == null || created.InternalId == 0)
                     {

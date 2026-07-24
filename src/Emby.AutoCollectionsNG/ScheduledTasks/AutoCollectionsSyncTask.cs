@@ -32,12 +32,8 @@ namespace Emby.AutoCollectionsNG.ScheduledTasks
         /// <summary>
         /// Constructor used by the Emby host via standard plugin dependency injection.
         /// </summary>
-        public AutoCollectionsSyncTask(
-            ILibraryManager libraryManager,
-            ICollectionManager collectionManager,
-            IUserManager userManager,
-            ILogger logger)
-            : this(new CollectionSyncService(libraryManager, collectionManager, logger, userManager: userManager), logger, null)
+        public AutoCollectionsSyncTask(ILibraryManager libraryManager, ICollectionManager collectionManager, ILogger logger)
+            : this(new CollectionSyncService(libraryManager, collectionManager, logger), logger, null)
         {
         }
 
