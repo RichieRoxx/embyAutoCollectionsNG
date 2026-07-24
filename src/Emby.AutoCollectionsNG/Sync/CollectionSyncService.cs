@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Emby.AutoCollectionsNG.Configuration;
@@ -106,15 +107,64 @@ namespace Emby.AutoCollectionsNG.Sync
                     item.Id,
                     item.GetType().Name);
 
-                // Candidate fallback: does re-fetching by Guid yield a usable InternalId?
-                // Deliberately GetItemById (not GetItemList) so this probe adds no extra item
-                // query - the sync's query count is asserted by the reentrancy unit test.
-                var refetched = _libraryManager.GetItemById(item.Id);
+                if (_diagItemsLogged > 1)
+                {
+                    return;
+                }
+
+                // Both Id (Guid) and InternalId (long) read back as default while Name and the
+                // runtime type are correct. Two competing explanations: (a) the objects genuinely
+                // carry no identity, or (b) we are binding to different members than the ones the
+                // running host populates (compile-time SDK 4.9.1.90 vs runtime Emby 4.9.5.0).
+                // Reflection over the live object settles it - and the assembly identities below
+                // test (b) directly.
+                var runtimeType = item.GetType();
                 _logger.Info(
-                    "ACNG-DIAG item #{0}: GetItemById(guid) -> {1}, internalId={2}",
-                    _diagItemsLogged,
-                    refetched == null ? "null" : "'" + refetched.Name + "'",
-                    refetched == null ? "n/a" : refetched.InternalId.ToString());
+                    "ACNG-DIAG asm: compiled-BaseItem='{0}' runtime-itemType='{1}' asm='{2}' isBaseItem={3}",
+                    typeof(BaseItem).Assembly.FullName,
+                    runtimeType.FullName,
+                    runtimeType.Assembly.FullName,
+                    item is BaseItem);
+
+                foreach (var prop in runtimeType.GetProperties(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if (prop.Name.IndexOf("id", StringComparison.OrdinalIgnoreCase) < 0 || prop.GetIndexParameters().Length > 0)
+                    {
+                        continue;
+                    }
+
+                    string value;
+                    try
+                    {
+                        value = Convert.ToString(prop.GetValue(item)) ?? "null";
+                    }
+                    catch (Exception ex)
+                    {
+                        value = "<threw " + ex.GetType().Name + ">";
+                    }
+
+                    _logger.Info("ACNG-DIAG prop {0} ({1}) = {2}", prop.Name, prop.PropertyType.Name, value);
+                }
+
+                foreach (var field in runtimeType.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                {
+                    if (field.Name.IndexOf("id", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+
+                    string value;
+                    try
+                    {
+                        value = Convert.ToString(field.GetValue(item)) ?? "null";
+                    }
+                    catch (Exception ex)
+                    {
+                        value = "<threw " + ex.GetType().Name + ">";
+                    }
+
+                    _logger.Info("ACNG-DIAG field {0} ({1}) = {2}", field.Name, field.FieldType.Name, value);
+                }
             }
             catch (Exception ex)
             {
