@@ -286,19 +286,32 @@ namespace Emby.AutoCollectionsNG.Sync
             return query;
         }
 
-        // Library-structure containers that are returned by an unfiltered item query but must never
-        // end up in a collection's ItemIdList. Passing one of these to CreateCollection is a strong
-        // candidate for the host rejecting the whole call. Matched by runtime type name rather than
-        // `is` checks so this stays compilable regardless of which of these types the SDK exposes
-        // publicly in a given version.
-        private static readonly HashSet<string> StructuralItemTypes = new HashSet<string>(StringComparer.Ordinal)
+        // Item types that must never end up in a collection, matched by runtime type name so this
+        // stays compilable regardless of which of them the SDK exposes publicly in a given version.
+        //
+        // Two groups:
+        //   - Library structure (root, "Media Folders", the per-library folders, existing
+        //     collections). An unfiltered item query returns these.
+        //   - Live TV guide data. `LiveTvProgram` entries are EPG listings, not library content -
+        //     on a DVR setup they vastly outnumber the actual recordings (3409 vs 188 here). Emby
+        //     silently refuses them as collection members: AddToCollection accepts the call but
+        //     never persists the membership (the same 15 items were re-added on every single run),
+        //     and CreateCollection returns null outright when every candidate is one of these, so
+        //     the collection was never created at all.
+        private static readonly HashSet<string> NonMemberItemTypes = new HashSet<string>(StringComparer.Ordinal)
         {
+            // Library structure
             "AggregateFolder",
             "UserRootFolder",
             "CollectionFolder",
             "UserView",
             "Folder",
-            "BoxSet"
+            "BoxSet",
+            // Live TV guide data, not library items
+            "LiveTvProgram",
+            "LiveTvChannel",
+            "TvChannel",
+            "Program"
         };
 
         private void ProcessItem(
@@ -307,10 +320,8 @@ namespace Emby.AutoCollectionsNG.Sync
             Dictionary<CollectionRule, HashSet<long>> perRuleMatches,
             SyncResult result)
         {
-            if (StructuralItemTypes.Contains(item.GetType().Name))
+            if (NonMemberItemTypes.Contains(item.GetType().Name))
             {
-                // 'root', 'Media Folders', the per-library folders and existing collections
-                // themselves - never collection members.
                 return;
             }
 

@@ -9,6 +9,7 @@ using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.Logging;
 using Moq;
 using Xunit;
@@ -746,6 +747,38 @@ namespace Emby.AutoCollectionsNG.Tests.Sync
             Assert.True(
                 stopwatch.Elapsed < TimeSpan.FromSeconds(10),
                 $"Sync of {itemCount} items took {stopwatch.Elapsed}, which is suspiciously slow - possible algorithmic regression.");
+        }
+
+        /// <summary>
+        /// Live TV guide entries must never be treated as collection members.
+        ///
+        /// On a DVR setup they massively outnumber real recordings (3409 LiveTvProgram entries vs
+        /// 188 recordings on the server this was found on), and Emby silently refuses them:
+        /// AddToCollection accepts the call but never persists the membership, so the same items
+        /// were re-added on every run, and CreateCollection returns null outright when every
+        /// candidate is a LiveTvProgram - meaning the collection was never created at all.
+        /// </summary>
+        [Fact]
+        public async Task LiveTvGuideEntries_AreNeverCollectionMembers()
+        {
+            var recording = MakeItem(1, "Formel 1 Rennen");
+            var guideEntry = new LiveTvProgram { InternalId = 2, Name = "Formel 1 Qualifying" };
+
+            var (library, collectionManager, logger) = MakeMocks(new BaseItem[] { recording, guideEntry });
+
+            var config = new PluginConfiguration
+            {
+                Rules = new[] { Rule("Formel 1", RuleMatchType.Contains, "Formel 1") }
+            };
+
+            var sut = new CollectionSyncService(library.Object, collectionManager.Object, logger.Object);
+            var result = await sut.SyncAsync(config, null, CancellationToken.None);
+
+            // Only the real recording counts as a match, and only it is ever added.
+            Assert.Equal(1, result.RuleHitCounts["Formel 1"]);
+            collectionManager.Verify(
+                m => m.AddToCollection(9999, It.Is<long[]>(ids => ids.Length == 1 && ids[0] == 1)),
+                Times.Once);
         }
 
         /// <summary>
