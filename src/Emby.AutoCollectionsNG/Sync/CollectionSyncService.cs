@@ -521,7 +521,7 @@ namespace Emby.AutoCollectionsNG.Sync
                 if (string.Equals(ReadCollectionType(folder), "boxsets", StringComparison.OrdinalIgnoreCase))
                 {
                     _collectionsFolder = folder;
-                    _logger.Info(
+                    _logger.Debug(
                         "Auto Collections NG: using collections folder '{0}' (internalId {1}).",
                         folder.Name,
                         folder.InternalId);
@@ -581,7 +581,7 @@ namespace Emby.AutoCollectionsNG.Sync
 
                 try
                 {
-                    _logger.Info(
+                    _logger.Debug(
                         "Auto Collections NG: creating '{0}' for {1} item(s) of type(s): {2}.",
                         collectionName,
                         desiredIds.Count,
@@ -613,12 +613,16 @@ namespace Emby.AutoCollectionsNG.Sync
                         var detail = created == null
                             ? "the host returned no BoxSet"
                             : "the host returned a BoxSet with InternalId 0";
-                        result.Errors.Add($"Failed to create collection '{collectionName}': {detail}, so nothing was persisted.");
+                        // The host gives no reason, so the item types go into the error itself:
+                        // it refuses some of them (Live TV guide entries) without saying so.
+                        var types = DescribeItemTypes(desiredIds);
+                        result.Errors.Add($"Failed to create collection '{collectionName}': {detail}, so nothing was persisted. Requested {desiredIds.Count} item(s) of type(s): {types}.");
                         _logger.Error(
-                            "Auto Collections NG: creating collection '{0}' did not persist anything - {1}. Requested {2} item(s).",
+                            "Auto Collections NG: creating collection '{0}' did not persist anything - {1}. Requested {2} item(s) of type(s): {3}.",
                             collectionName,
                             detail,
-                            desiredIds.Count);
+                            desiredIds.Count,
+                            types);
                         return;
                     }
 
@@ -690,10 +694,10 @@ namespace Emby.AutoCollectionsNG.Sync
 
             if (toAdd.Length > 0)
             {
-                // Logged every run on purpose: if the same items keep showing up here, the host is
-                // accepting the add but not persisting the membership for those types, which is the
-                // only visible symptom of that.
-                _logger.Info(
+                // At Debug: if the same items keep reappearing here run after run, the host is
+                // accepting the add without persisting the membership for those item types, and the
+                // type breakdown is the only visible symptom of that.
+                _logger.Debug(
                     "Auto Collections NG: collection '{0}' needs {1} item(s) added, type(s): {2}.",
                     collectionName,
                     toAdd.Length,
