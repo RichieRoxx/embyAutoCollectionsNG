@@ -42,18 +42,56 @@ namespace Emby.AutoCollectionsNG.Sync
         // can never report members).
         private readonly Func<BaseItem, long[]> _collectionMemberIdsProvider;
 
+        // Optional: only used to populate CollectionCreationOptions.UserIds. Nullable so the test
+        // seam and any host that doesn't supply it still work.
+        private readonly IUserManager _userManager;
+
         public CollectionSyncService(
             ILibraryManager libraryManager,
             ICollectionManager collectionManager,
             ILogger logger,
             RuleMatcher ruleMatcher = null,
-            Func<BaseItem, long[]> collectionMemberIdsProvider = null)
+            Func<BaseItem, long[]> collectionMemberIdsProvider = null,
+            IUserManager userManager = null)
         {
             _libraryManager = libraryManager ?? throw new ArgumentNullException(nameof(libraryManager));
             _collectionManager = collectionManager ?? throw new ArgumentNullException(nameof(collectionManager));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _ruleMatcher = ruleMatcher ?? new RuleMatcher();
             _collectionMemberIdsProvider = collectionMemberIdsProvider ?? GetCollectionMemberIds;
+            _userManager = userManager;
+        }
+
+        /// <summary>
+        /// Internal IDs of all users, for <see cref="CollectionCreationOptions.UserIds"/>.
+        ///
+        /// Emby's own dashboard creates collections through
+        /// <c>POST /Collections?Name=...&amp;Ids=...&amp;userId=...</c> - it always supplies a user.
+        /// Creating one from a scheduled task with no user context returns <c>null</c> and persists
+        /// nothing (verified on a live 4.9.5 server, including with ParentId pointed explicitly at
+        /// the 'boxsets' library folder, which did not help). Supplying the users is the remaining
+        /// difference between our call and the one that demonstrably works.
+        /// </summary>
+        private long[] GetUserIdsForCreation()
+        {
+            if (_userManager == null)
+            {
+                return Array.Empty<long>();
+            }
+
+            try
+            {
+                return (_userManager.Users ?? Enumerable.Empty<User>())
+                    .Where(u => u != null)
+                    .Select(u => u.InternalId)
+                    .Where(id => id != 0)
+                    .ToArray();
+            }
+            catch (Exception ex)
+            {
+                _logger.ErrorException("Auto Collections NG: could not read the user list for collection creation", ex);
+                return Array.Empty<long>();
+            }
         }
 
         /// <summary>
@@ -65,8 +103,9 @@ namespace Emby.AutoCollectionsNG.Sync
         /// persisted members reported zero children). Because the reconciliation diffs desired
         /// against current membership, that made every run re-add every member - the sync logged
         /// "+107 / -0" on a collection that already contained those items, breaking the idempotency
-        /// requirement. Querying by <see cref="InternalItemsQuery.ParentIds"/> is how Emby's own
-        /// clients list a collection's contents.
+        /// requirement. <see cref="InternalItemsQuery.ParentIds"/> does not work either: a BoxSet's
+        /// members are linked children rather than filesystem-style children, so the collection has
+        /// to be addressed via <c>CollectionIds</c>.
         /// </summary>
         private long[] GetCollectionMemberIds(BaseItem collection)
         {
@@ -77,7 +116,11 @@ namespace Emby.AutoCollectionsNG.Sync
 
             var members = _libraryManager.GetItemList(new InternalItemsQuery
             {
-                ParentIds = new[] { collection.InternalId },
+                // CollectionIds, not ParentIds: a BoxSet's members are linked children, not
+                // filesystem-style children. Querying by ParentIds returned nothing for a
+                // collection that demonstrably held 90 members, which is what made every run
+                // re-add everything.
+                CollectionIds = new[] { collection.InternalId },
                 // All fields, or the returned members come back with InternalId 0 - see BuildItemQuery.
                 DtoOptions = new DtoOptions(true)
             });
@@ -469,7 +512,8 @@ namespace Emby.AutoCollectionsNG.Sync
                 {
                     Name = collectionName,
                     ItemIdList = desiredIds.ToArray(),
-                    ParentId = target.InternalId
+                    ParentId = target.InternalId,
+                    UserIds = GetUserIdsForCreation()
                 }).ConfigureAwait(false);
 
                 _logger.Info(
@@ -534,7 +578,8 @@ namespace Emby.AutoCollectionsNG.Sync
                     var created = await _collectionManager.CreateCollection(new CollectionCreationOptions
                     {
                         Name = collectionName,
-                        ItemIdList = desiredIds.ToArray()
+                        ItemIdList = desiredIds.ToArray(),
+                        UserIds = GetUserIdsForCreation()
                     }).ConfigureAwait(false);
 
                     if (created == null || created.InternalId == 0)
