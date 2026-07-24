@@ -5,15 +5,17 @@ configurable title rules (regex or contains) — primarily for **TV recordings**
 from an OpenViX/Vu+ receiver. Fully local: no cloud, no online metadata, no
 open ports.
 
-> **Status:** v0.1.0 — feature-complete and **verified end-to-end against a
-> live Emby 4.9.5 server** (Synology DSM). All planned work packages (GitHub
-> issues #2–#10) are implemented and covered by 80 unit tests. Collections are
+> **Status:** feature-complete and **verified end-to-end against a live Emby
+> 4.9.5 server** (Synology DSM). All planned work packages (GitHub issues
+> #2–#10) are implemented and covered by 80 unit tests. Collections are
 > created, populated and shown in the Emby UI, the dashboard config page loads
-> and saves, and a second sync run makes zero writes. See
-> [`docs/PLAN.md`](docs/PLAN.md) for the roadmap and
-> [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md) for the
-> verified Emby API surface, including several behaviours that are easy to get
-> wrong (see [Known limitations](#known-limitations--open-items)).
+> and saves, and a second sync run makes zero writes. **No `v0.1.0` release
+> has been tagged/published yet** (tracked in
+> [issue #11](../../issues/11)) — build from source for now, see
+> [Installation](#installation). See [`docs/PLAN.md`](docs/PLAN.md) for the
+> roadmap and [`docs/emby-api-cheatsheet.md`](docs/emby-api-cheatsheet.md) for
+> the verified Emby API surface, including several behaviours that are easy to
+> get wrong (see [Known limitations](#known-limitations--open-items)).
 
 ## Why?
 
@@ -105,6 +107,8 @@ Collections NG): a table of rules (add/remove rows, edit every field inline),
 a "delete empty collections" checkbox, a **Save** button, and a **Sync Now**
 button that triggers an immediate sync independent of the daily schedule.
 
+![Auto Collections NG configuration page in the Emby dashboard](docs/images/config-ui.png)
+
 ## Example sync run
 
 A log excerpt from a scheduled/manual run (`AutoCollectionsSyncTask`,
@@ -139,8 +143,10 @@ dotnet test                 # 80 unit tests: matching engine, config round-trip,
 
 ## Installation
 
-1. Download a release archive from the [Releases page](../../releases), or
-   build it yourself:
+1. **No tagged release exists yet** (see [issue #11](../../issues/11)), so
+   build it yourself for now — once a `v*` tag is pushed, the
+   [release workflow](.github/workflows/release.yml) will publish a ready-to-use
+   zip to the [Releases page](../../releases) instead:
    ```bash
    dotnet publish src/Emby.AutoCollectionsNG/Emby.AutoCollectionsNG.csproj -c Release -o publish
    ```
@@ -153,8 +159,8 @@ dotnet test                 # 80 unit tests: matching engine, config round-trip,
    folder, since those are provided by the Emby host itself:
    - `System.Memory.dll`, `System.Buffers.dll`, `System.Numerics.Vectors.dll`,
      `System.Runtime.CompilerServices.Unsafe.dll`
-   - (a released zip from the Releases page already contains exactly this
-     filtered set — see the release workflow's packaging step)
+   - (once a release is published, its zip will contain exactly this filtered
+     set — see the release workflow's packaging step)
    - Windows: `%AppData%\Emby-Server\plugins`
    - Linux: typically `/var/lib/emby/plugins`
    - Docker: `/config/plugins`
