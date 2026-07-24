@@ -315,7 +315,13 @@ namespace Emby.AutoCollectionsNG.Sync
             var query = new InternalItemsQuery
             {
                 Recursive = true,
-                DtoOptions = new DtoOptions(false)
+                // DIAGNOSTIC/CANDIDATE FIX: was DtoOptions(false). Against the live server every
+                // returned BaseItem had InternalId == 0 and Id == Guid.Empty (confirmed by
+                // reflection, and not an assembly-version mismatch - the reference resolves to the
+                // host's own MediaBrowser.Controller 4.9.5.0). DtoOptions is what the query hands
+                // the item repository to decide which columns it materializes, so a minimal-fields
+                // request is the prime suspect for identity columns not being populated.
+                DtoOptions = new DtoOptions(true)
             };
 
             // If every rule restricts item types, push the union down into the query as a perf
@@ -448,7 +454,10 @@ namespace Emby.AutoCollectionsNG.Sync
                 {
                     IncludeItemTypes = new[] { "BoxSet" },
                     Recursive = true,
-                    DtoOptions = new DtoOptions(false)
+                    // See BuildItemQuery: was DtoOptions(false); the returned BoxSet also came back
+                    // with InternalId == 0, which is what makes AddToCollection throw
+                    // "No collection exists with the supplied Id".
+                    DtoOptions = new DtoOptions(true)
                 });
             }
             catch (Exception ex)
